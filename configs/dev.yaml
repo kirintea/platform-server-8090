@@ -54,8 +54,8 @@ agent:
   context_reserve_ratio: 0.1
   permission_mode: "bypass"
   tool_guard:
-    enabled: false
-    mode: "blocklist"
+    enabled: true
+    mode: "allowlist" # allowlist | blocklist
     tools: []
 
 # MCP 服务列表 (可选)
