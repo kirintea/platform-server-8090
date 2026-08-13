@@ -1,0 +1,32 @@
+# Neo4j 图数据库 - Community 版本
+# 端口：7474（Web 控制台）、7687（Bolt 协议）
+# 默认账号：neo4j / password123
+
+services:
+  neo4j:
+    image: neo4j:5-community
+    environment:
+      # 设置认证信息，格式为 用户名/密码
+      # 生产环境请修改为强密码
+      NEO4J_AUTH: neo4j/password123
+    ports:
+      - "7474:7474"  # Web 管理控制台，浏览器访问 http://localhost:7474
+      - "7687:7687"  # Bolt 协议端口，供应用程序连接
+    volumes:
+      - neo4j_data:/data
+    healthcheck:
+      # 通过检查 Bolt 端口（7687）的 TCP 连接判断服务是否就绪
+      test:
+        - CMD-SHELL
+        - 'PORT_HEX="$(printf ''%04X'' 7687)"; cat /proc/net/tcp /proc/net/tcp6 2>/dev/null | grep -q ":$${PORT_HEX} "'
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 10s
+    stop_grace_period: 30s
+    restart: unless-stopped
+
+volumes:
+  # 使用显式命名卷，支持跨项目复用同一份数据
+  neo4j_data:
+    name: neo4j_shared_data

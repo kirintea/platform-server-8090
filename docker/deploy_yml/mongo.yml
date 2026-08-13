@@ -1,0 +1,30 @@
+# MongoDB 文档型数据库
+# 端口：27017（MongoDB 协议）
+# 默认账号：admin / admin123
+
+services:
+  mongo:
+    image: mongo:latest
+    environment:
+      # root 用户名和密码
+      MONGO_INITDB_ROOT_USERNAME: admin
+      MONGO_INITDB_ROOT_PASSWORD: admin123
+    ports:
+      - "27017:27017"  # MongoDB 协议端口，供应用程序连接
+    volumes:
+      # 数据目录持久化
+      - mongo_data:/data/db
+    healthcheck:
+      # 通过 mongosh 连接测试判断服务是否就绪
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')", "-u", "admin", "-p", "admin123", "--authenticationDatabase", "admin", "--quiet"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 15s
+    stop_grace_period: 30s
+    restart: unless-stopped
+
+volumes:
+  # 使用显式命名卷，支持跨项目复用同一份数据
+  mongo_data:
+    name: mongo_shared_data

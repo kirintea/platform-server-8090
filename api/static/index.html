@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AgentScope Chat</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+
+<!-- ============ Sidebar ============ -->
+<aside class="sidebar" id="sidebar">
+  <div class="sidebar-header">
+    <div class="app-title">🤖 AgentScope</div>
+    <div class="user-row">
+      <input id="userId" type="text" value="user_001" placeholder="用户 ID">
+    </div>
+    <button class="btn-new-session" onclick="newSession()">
+      <span>＋</span> 新会话
+    </button>
+  </div>
+  <div class="session-list" id="sessionList">
+    <div class="session-list-empty">暂无历史会话</div>
+  </div>
+</aside>
+
+<!-- ============ Main ============ -->
+<div class="main">
+  <div class="header">
+    <div class="header-left">
+      <button class="btn-toggle-sidebar" onclick="toggleSidebar()" title="切换侧边栏">☰</button>
+      <h1>AgentScope Chat</h1>
+    </div>
+    <div class="header-info">
+      <span><span class="dot"></span> 在线</span>
+      <span id="sessionInfo">会话: —</span>
+    </div>
+  </div>
+
+  <div class="messages" id="messages"></div>
+
+  <div class="input-area">
+    <textarea id="input" placeholder="输入消息... (Enter 发送, Shift+Enter 换行)" rows="1"></textarea>
+    <button id="sendBtn" onclick="send()">发送</button>
+    <button id="stopBtn" onclick="stop()" style="display:none">停止</button>
+  </div>
+</div>
+
+<script src="/static/chat.js"></script>
+</body>
+</html>

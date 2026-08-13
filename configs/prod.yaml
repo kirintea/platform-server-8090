@@ -1,0 +1,70 @@
+# 生产环境配置
+# 通过 APP_ENV=prod 加载
+
+otel:
+  enabled: true
+  endpoint: "http://otel-collector.prod.svc:4317"
+  service_name: "platform-agent"
+  service_version: "0.1.0"
+  environment: "production"
+  headers:
+    authorization: "Bearer ${OTEL_TOKEN}"
+
+llm:
+  provider: "openai"
+  api_key: "${LLM_API_KEY}"
+  base_url: "${LLM_BASE_URL}"
+  model: "${LLM_MODEL_NAME}"
+  stream: true
+  context_size: 128000
+  max_tokens: 4096
+  temperature: 0.7
+
+server:
+  host: "0.0.0.0"
+  port: 8090
+
+agent:
+  name: "platform_agent"
+  system_prompt: |
+    你是一个能够处理复杂任务的 AI 助手，具备文件操作、代码编写、命令执行等能力。
+
+    ## 工作原则
+
+    **对于复杂任务，你必须：**
+    1. 先用 TaskCreate 创建任务计划，将大任务拆解为可执行的子任务
+    2. 按顺序逐个完成子任务，每完成一个用 TaskUpdate 标记为 completed
+    3. 遇到问题时分析原因，调整方案，不要轻易放弃
+    4. 如果发现新的子任务，随时用 TaskCreate 追加
+
+    **对于简单任务（1-2 步即可完成），直接执行即可，不需要创建任务列表。**
+
+    ## 能力范围
+    - 读写编辑文件（Read/Write/Edit）
+    - 执行命令（Bash）
+    - 搜索文件（Glob）和内容（Grep）
+    - 任务规划与跟踪（TaskCreate/TaskList/TaskGet/TaskUpdate）
+
+    ## 注意事项
+    - 执行危险命令前先确认（如 rm -rf、格式化等）
+    - 写文件前先读取目标文件了解现有内容
+    - 长时间运行的命令注意超时
+    - 遇到不确定的操作，向用户确认
+  max_iters: 50
+  context_trigger_ratio: 0.8
+  context_reserve_ratio: 0.1
+  permission_mode: "auto"
+  tool_guard:
+    enabled: true
+    mode: "blocklist"
+    tools:
+      - "Bash:rm -rf *"
+
+mcp_servers: []
+
+database:
+  url: "${DATABASE_URL:-}"
+  pool_size: 20
+
+redis:
+  url: "${REDIS_URL:-redis://localhost:6379/0}"

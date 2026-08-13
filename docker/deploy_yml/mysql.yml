@@ -1,0 +1,35 @@
+# MySQL 关系型数据库
+# 端口：3306（MySQL 协议）
+# 默认账号：root / root123
+# 默认数据库：app_db
+
+services:
+  mysql:
+    image: mysql:latest
+    environment:
+      # root 用户密码
+      MYSQL_ROOT_PASSWORD: root123
+      # 启动时自动创建的数据库
+      MYSQL_DATABASE: app_db
+      # 自动创建的普通用户（拥有 MYSQL_DATABASE 的全部权限）
+      MYSQL_USER: app_user
+      MYSQL_PASSWORD: app123
+    ports:
+      - "3306:3306"  # MySQL 协议端口，供应用程序连接
+    volumes:
+      # 数据目录持久化
+      - mysql_data:/var/lib/mysql
+    healthcheck:
+      # 通过 mysqladmin ping 判断服务是否就绪
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-uroot", "-proot123"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 30s
+    stop_grace_period: 30s
+    restart: unless-stopped
+
+volumes:
+  # 使用显式命名卷，支持跨项目复用同一份数据
+  mysql_data:
+    name: mysql_shared_data

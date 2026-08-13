@@ -1,0 +1,145 @@
+# docker-compose.yaml
+# 本地可观测性调试栈：OTel Collector + Jaeger + Prometheus + Loki + Grafana + Redis + PostgreSQL
+# 启动: cd docker; docker-compose up -d
+# 停止: cd docker; docker-compose down
+
+version: "3.8"
+
+services:
+  # ============================================================
+  # 1. OTel Collector - 数据接收与分发
+  # ============================================================
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:latest
+    container_name: otel-collector-dev
+    command: ["--config=/etc/otelcol/config.yaml"]
+    volumes:
+      - ./otel-collector-dev.yaml:/etc/otelcol/config.yaml
+    ports:
+      - "4317:4317"   # OTLP gRPC (Agent 上报)
+      - "4318:4318"   # OTLP HTTP
+      - "8889:8889"   # Prometheus exporter
+    depends_on:
+      - jaeger
+      - prometheus
+      - loki
+    networks:
+      - otel-network
+
+  # ============================================================
+  # 2. Jaeger - Trace 存储 + UI (内存模式，仅本地调试)
+  # ============================================================
+  jaeger:
+    image: jaegertracing/all-in-one:latest
+    container_name: jaeger-dev
+    environment:
+      - COLLECTOR_OTLP_ENABLED=true
+    ports:
+      - "16686:16686"   # Jaeger UI
+      - "4317"          # 内部 OTLP gRPC (Collector → Jaeger)
+    networks:
+      - otel-network
+
+  # ============================================================
+  # 3. Prometheus - Metrics 指标存储
+  # ============================================================
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: prometheus-dev
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml
+    networks:
+      - otel-network
+
+  # ============================================================
+  # 4. Loki - Logs 日志聚合
+  # ============================================================
+  loki:
+    image: grafana/loki:latest
+    container_name: loki-dev
+    ports:
+      - "3100:3100"
+    volumes:
+      - ./loki-config.yml:/etc/loki/loki-config.yml
+    networks:
+      - otel-network
+
+  # ============================================================
+  # 5. Grafana - 统一可视化大盘
+  # ============================================================
+  grafana:
+    image: grafana/grafana:latest
+    container_name: grafana-dev
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_AUTH_ANONYMOUS_ENABLED=true
+      - GF_AUTH_ANONYMOUS_ORG_ROLE=Admin
+    depends_on:
+      - jaeger
+      - prometheus
+      - loki
+    networks:
+      - otel-network
+
+  # ============================================================
+  # 6. Redis - 会话状态持久化
+  # ============================================================
+  redis:
+    image: redis:7-alpine
+    container_name: redis-dev
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-shared-data:/data
+    command: >
+      redis-server
+      --appendonly yes
+      --maxmemory 256mb
+      --maxmemory-policy allkeys-lru
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 10s
+    restart: unless-stopped
+    networks:
+      - otel-network
+
+  # ============================================================
+  # 7. PostgreSQL - 对话历史持久化
+  # ============================================================
+  postgres:
+    image: bitnami/postgresql:latest
+    container_name: postgres-dev
+    environment:
+      POSTGRESQL_USERNAME: user
+      POSTGRESQL_PASSWORD: password
+      POSTGRESQL_DATABASE: ragdb
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-shared-data:/bitnami/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U user -d ragdb"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 10s
+    restart: unless-stopped
+    networks:
+      - otel-network
+
+volumes:
+  redis-shared-data:
+    name: redis_shared_data
+  postgres-shared-data:
+    name: postgres_shared_data
+
+networks:
+  otel-network:
+    driver: bridge

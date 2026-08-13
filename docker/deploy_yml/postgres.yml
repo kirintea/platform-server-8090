@@ -1,0 +1,35 @@
+# PostgreSQL 关系数据库 - Bitnami 版本
+# 端口：5432（PostgreSQL 协议）
+# 默认账号：user / password，数据库名：ragdb
+
+services:
+  postgres:
+    image: bitnami/postgresql:latest
+    environment:
+      # 数据库用户名
+      POSTGRESQL_USERNAME: user
+      # 数据库密码（生产环境请修改为强密码）
+      POSTGRESQL_PASSWORD: password
+      # 自动创建的数据库名
+      POSTGRESQL_DATABASE: ragdb
+    ports:
+      - "5432:5432"  # PostgreSQL 协议端口，供应用程序连接
+    volumes:
+      # Bitnami 镜像默认数据目录为 /bitnami/postgresql
+      - postgres_data:/bitnami/postgresql
+    healthcheck:
+      # 通过检查 5432 端口的 TCP 连接判断服务是否就绪
+      test:
+        - CMD-SHELL
+        - 'PORT_HEX="$(printf ''%04X'' 5432)"; cat /proc/net/tcp /proc/net/tcp6 2>/dev/null | grep -q ":$${PORT_HEX} "'
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 10s
+    stop_grace_period: 30s
+    restart: unless-stopped
+
+volumes:
+  # 使用显式命名卷，支持跨项目复用同一份数据
+  postgres_data:
+    name: postgres_shared_data

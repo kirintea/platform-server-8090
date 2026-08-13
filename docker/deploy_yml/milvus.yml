@@ -1,0 +1,63 @@
+# Milvus 向量数据库 - Standalone 模式（单机部署）
+# 包含两个服务：Milvus 主服务 + etcd 元数据存储
+# 端口：19530（gRPC）、9091（健康检查/指标）
+
+services:
+  milvus:
+    image: milvusdb/milvus:v2.6.11
+    command: ["milvus", "run", "standalone"]
+    security_opt:
+      - seccomp:unconfined
+    environment:
+      # etcd 服务地址，用于存储元数据
+      ETCD_ENDPOINTS: milvus-etcd:2379
+      # 使用本地存储替代 MinIO，无需额外的对象存储服务
+      COMMON_STORAGETYPE: local
+    ports:
+      - "19530:19530"  # gRPC 端口，供客户端 SDK 连接
+      - "9091:9091"    # HTTP 端口，用于健康检查和指标监控
+    volumes:
+      - milvus_data:/var/lib/milvus
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - 'PORT_HEX="$(printf ''%04X'' 19530)"; cat /proc/net/tcp /proc/net/tcp6 2>/dev/null | grep -q ":$${PORT_HEX} "'
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 10s
+    depends_on:
+      # etcd 必须先启动且健康，Milvus 才能启动
+      milvus-etcd:
+        condition: service_healthy
+    restart: unless-stopped
+
+  milvus-etcd:
+    image: milvusdb/etcd:3.5.25-r1
+    environment:
+      # 允许无密码认证（仅限开发环境）
+      ALLOW_NONE_AUTHENTICATION: "yes"
+      # 自动压缩策略：按版本号压缩，保留最近 1000 个版本
+      ETCD_AUTO_COMPACTION_MODE: revision
+      ETCD_AUTO_COMPACTION_RETENTION: "1000"
+      # 后端存储配额：4GB
+      ETCD_QUOTA_BACKEND_BYTES: "4294967296"
+      # 每 50000 次事务触发一次快照
+      ETCD_SNAPSHOT_COUNT: "50000"
+    volumes:
+      # 挂载到 Bitnami 镜像默认的数据目录
+      - milvus-etcd_data:/bitnami/etcd
+    healthcheck:
+      test: ["CMD", "etcdctl", "endpoint", "health"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+    stop_grace_period: 30s
+    restart: unless-stopped
+
+volumes:
+  # 使用显式命名卷，支持跨项目复用同一份数据
+  milvus_data:
+    name: milvus_shared_data
+  milvus-etcd_data:
+    name: milvus_shared_etcd_data
