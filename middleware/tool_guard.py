@@ -21,7 +21,8 @@ import fnmatch
 from typing import Any
 
 from agentscope.middleware import MiddlewareBase
-from agentscope.message import ToolResultBlock, ToolResultState
+from agentscope.message import TextBlock, ToolCallBlock, ToolResultState
+from agentscope.tool import ToolResponse
 
 from core.config.schemas import ToolGuardConfig
 
@@ -42,37 +43,33 @@ class ToolGuardMiddleware(MiddlewareBase):
     async def on_acting(self, agent: Any, input_kwargs: dict, next_handler: Any):
         """拦截工具执行阶段
 
-        在工具实际执行前检查是否命中黑白名单规则。
-        如果被拦截，直接返回 DENIED 状态的 ToolResultBlock。
+        on_acting 是逐个工具调用的洋葱钩子，input_kwargs 中包含:
+          - tool_call: 单个 ToolCallBlock（.name, .input）
+
+        如果被拦截，直接 yield 一个 DENIED 状态的 ToolResponse，
+        不调用 next_handler，从而阻止工具实际执行。
         """
         if not self._enabled:
             async for item in next_handler(**input_kwargs):
                 yield item
             return
 
-        # 从 input_kwargs 中提取工具调用信息
-        tool_calls = input_kwargs.get("tool_calls", [])
-        blocked_indices: set[int] = set()
+        tool_call: ToolCallBlock = input_kwargs["tool_call"]
+        tool_name = tool_call.name
+        tool_input = tool_call.input  # JSON 字符串，如 '"pwd"' 或 '{"command":"ls"}'
+        tool_signature = f"{tool_name}:{tool_input}" if tool_input else tool_name
 
-        for idx, tc in enumerate(tool_calls):
-            tool_name = getattr(tc, "name", None) or tc.get("name", "")
-            tool_args = getattr(tc, "arguments", None) or tc.get("arguments", "")
-            tool_signature = f"{tool_name}:{tool_args}" if tool_args else tool_name
-
-            if self._is_blocked(tool_signature):
-                blocked_indices.add(idx)
-
-        if not blocked_indices:
-            # 没有被拦截的工具，正常执行
+        if not self._is_blocked(tool_signature):
             async for item in next_handler(**input_kwargs):
                 yield item
             return
 
-        # 有被拦截的工具 — 需要修改 tool_calls 并注入拒绝结果
-        # 注意：这里我们通过修改 input_kwargs 来跳过被拦截的工具
-        # 实际的拒绝结果由框架在工具结果处理阶段自动注入
-        async for item in next_handler(**input_kwargs):
-            yield item
+        # 被拦截 — 构造拒绝结果，不调用 next_handler
+        yield ToolResponse(
+            id=tool_call.id,
+            content=[TextBlock(text=f"[ToolGuard] 工具调用被拦截: {tool_signature}")],
+            state=ToolResultState.DENIED,
+        )
 
     # ------------------------------------------------------------------
     # 规则匹配
