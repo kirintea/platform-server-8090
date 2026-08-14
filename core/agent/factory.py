@@ -31,6 +31,7 @@ from agentscope.tool import (
 )
 from agentscope.mcp import MCPClient, StdioMCPConfig, HttpMCPConfig
 from agentscope.skill import LocalSkillLoader
+from pydantic import SecretStr
 
 from core.config.schemas import AppConfig, LLMConfig, MCPConfig
 from core.formatter import SiliconFlowFormatter
@@ -115,7 +116,7 @@ class AgentFactory:
         - SiliconFlow API 需要自定义 Formatter 扁平化 content 格式
         """
         credential = OpenAICredential(
-            api_key=llm_config.api_key,
+            api_key=SecretStr(llm_config.api_key),
             base_url=llm_config.base_url,
         )
 
@@ -182,13 +183,13 @@ class AgentFactory:
                     command=cfg.command,
                     args=cfg.args or None,
                 )
-                clients.append(MCPClient(config=mcp_config))
+                clients.append(MCPClient(config=mcp_config)) # type: ignore
             elif cfg.transport == "http" and cfg.url:
                 mcp_config = HttpMCPConfig(
                     url=cfg.url,
                     headers=cfg.headers or None,
                 )
-                clients.append(MCPClient(config=mcp_config))
+                clients.append(MCPClient(config=mcp_config)) # type: ignore
         return clients
 
     @staticmethod
