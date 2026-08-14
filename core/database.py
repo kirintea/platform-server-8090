@@ -49,9 +49,18 @@ DDL_STATEMENTS = [
     ALTER TABLE conversations ADD COLUMN IF NOT EXISTS status VARCHAR(16) NOT NULL DEFAULT 'active'
     """,
 
-    # metadata 默认值改为 NULL（已有表）
+    # JSONB 字段默认值改为 NULL（已有表）
     """
     ALTER TABLE conversations ALTER COLUMN metadata SET DEFAULT NULL
+    """,
+    """
+    ALTER TABLE sessions ALTER COLUMN config SET DEFAULT NULL
+    """,
+    """
+    ALTER TABLE mcps ALTER COLUMN config SET DEFAULT NULL
+    """,
+    """
+    ALTER TABLE skills ALTER COLUMN data SET DEFAULT NULL
     """,
 
     # 索引：用户+会话查询（过滤状态）
@@ -90,7 +99,7 @@ DDL_STATEMENTS = [
         agent_id    VARCHAR(32) NOT NULL,
         source      VARCHAR(16) NOT NULL DEFAULT 'user',
         team_id     VARCHAR(32),
-        config      JSONB NOT NULL DEFAULT '{}',
+        config      JSONB DEFAULT NULL,
         state_json  TEXT NOT NULL DEFAULT '',
         status      VARCHAR(16) NOT NULL DEFAULT 'active',
         created_at  TIMESTAMPTZ DEFAULT NOW(),
@@ -125,7 +134,7 @@ DDL_STATEMENTS = [
         user_id     VARCHAR(64) NOT NULL,
         name        VARCHAR(128) NOT NULL,
         transport   VARCHAR(16) NOT NULL DEFAULT 'stdio',
-        config      JSONB NOT NULL DEFAULT '{}',
+        config      JSONB DEFAULT NULL,
         enabled     BOOLEAN NOT NULL DEFAULT TRUE,
         created_at  TIMESTAMPTZ DEFAULT NOW(),
         updated_at  TIMESTAMPTZ DEFAULT NOW(),
@@ -143,7 +152,7 @@ DDL_STATEMENTS = [
         id          VARCHAR(32) PRIMARY KEY,
         user_id     VARCHAR(64) NOT NULL,
         name        VARCHAR(128) NOT NULL,
-        data        JSONB NOT NULL DEFAULT '{}',
+        data        JSONB DEFAULT NULL,
         enabled     BOOLEAN NOT NULL DEFAULT TRUE,
         created_at  TIMESTAMPTZ DEFAULT NOW(),
         updated_at  TIMESTAMPTZ DEFAULT NOW(),
@@ -560,7 +569,7 @@ class DatabaseManager:
             INSERT INTO sessions (id, user_id, agent_id, config, status)
             VALUES ($1, $2, 'default', $3, 'active')
             ON CONFLICT (id) DO UPDATE SET
-                config = sessions.config || EXCLUDED.config,
+                config = COALESCE(sessions.config, '{}'::jsonb) || EXCLUDED.config,
                 updated_at = NOW()
         """
         await self.execute(sql, session_id, user_id, json.dumps({"title": title}))
