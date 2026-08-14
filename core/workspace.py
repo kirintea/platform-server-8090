@@ -94,7 +94,7 @@ class LocalWorkspaceManager:
     def __init__(self, base_dir: str = "./workspaces") -> None:
         self._base_dir = os.path.abspath(base_dir)
         os.makedirs(self._base_dir, exist_ok=True)
-        logger.info("工作区管理器已初始化: %s", self._base_dir)
+        logger.info("工作区管理器已初始化: {}", self._base_dir)
 
     async def get_workspace(
         self,
@@ -135,7 +135,7 @@ class LocalWorkspaceManager:
         workdir = self._get_workdir(user_id, session_id)
         if os.path.isdir(workdir):
             shutil.rmtree(workdir, ignore_errors=True)
-            logger.info("已删除工作区: %s", workdir)
+            logger.info("已删除工作区: {}", workdir)
             return True
         return False
 

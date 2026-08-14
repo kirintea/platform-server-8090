@@ -22,15 +22,12 @@
 
 from __future__ import annotations
 
-import logging
 import os
 import sys
 import threading
 import webbrowser
 from contextlib import asynccontextmanager
-from datetime import datetime, timedelta
 
-import zoneinfo
 from loguru import logger
 
 import uvicorn
@@ -53,87 +50,12 @@ from api.webui import router as webui_router
 from core.chat_service import ChatService
 from core.config import ConfigManager
 from core.database import DatabaseManager
+from core.log.logger import setup_logging
 from core.redis_message_bus import RedisMessageBus
 from core.session import SessionManager
 from core.storage import PostgresStorage
 from core.tracing import TracingSetup
 from core.workspace import LocalWorkspaceManager
-
-
-# ============================================================
-# 0. 日志配置 (loguru)
-# ============================================================
-
-class _InterceptHandler(logging.Handler):
-    """标准 logging → loguru 桥接（拦截第三方库日志）"""
-
-    def emit(self, record: logging.LogRecord) -> None:
-        try:
-            level = logger.level(record.levelname).name
-        except ValueError:
-            level = record.levelno
-        logger.opt(depth=6, exception=record.exc_info).log(level, record.getMessage())
-
-
-_TZ_SHANGHAI = zoneinfo.ZoneInfo("Asia/Shanghai")
-
-
-def _beijing_rotation(message, file):
-    """北京时间 00:00 或文件 >50MB 时轮转
-
-    返回 datetime 对象：loguru 在当前时间超过该时刻时触发轮转。
-    """
-    if file.tell() > 50 * 1024 * 1024:
-        return True
-    now = datetime.now(_TZ_SHANGHAI)
-    return (now + timedelta(days=1)).replace(
-        hour=0, minute=0, second=0, microsecond=0,
-    )
-
-
-def setup_logging(log_dir: str, log_level: str, backup_count: int) -> None:
-    """配置 loguru 日志：异步写盘 + 北京时区轮转 + 第三方库拦截
-
-    Args:
-        log_dir: 日志文件目录
-        log_level: 日志级别
-        backup_count: 日志保留天数
-    """
-    os.makedirs(log_dir, exist_ok=True)
-    log_file = os.path.join(log_dir, "platform-server.log")
-
-    # 移除 loguru 默认 handler
-    logger.remove()
-
-    # 1. 控制台输出 → stderr（带颜色）
-    logger.add(
-        sys.stderr,
-        level=log_level.upper(),
-        format="<green>{time:YYYY-MM-DD HH:mm:ss}</green> | "
-               "<level>{level: <7}</level> | "
-               "<cyan>{process}</cyan> | "
-               "<cyan>{name}</cyan> | "
-               "<level>{message}</level>",
-        colorize=True,
-    )
-
-    # 2. 文件输出（异步写盘，北京时间 00:00 或 >50MB 轮转）
-    logger.add(
-        log_file,
-        level=log_level.upper(),
-        format="{time:YYYY-MM-DD HH:mm:ss} | {level: <7} | {process} | {name} | {message}",
-        rotation=_beijing_rotation,
-        retention=f"{backup_count} days",
-        encoding="utf-8",
-        enqueue=True,   # 异步写盘，不阻塞事件循环
-    )
-
-    # 3. 桥接标准 logging → loguru（拦截第三方库 DEBUG 噪音）
-    logging.basicConfig(handlers=[_InterceptHandler()], level=0, force=True)
-    for name in ("openai", "httpcore", "httpx", "redis.asyncio", "asyncio"):
-        logging.getLogger(name).setLevel(logging.WARNING)
-
-    logger.info("日志已配置: file={}, level={}, backup={}", log_file, log_level, backup_count)
 
 
 # ============================================================
