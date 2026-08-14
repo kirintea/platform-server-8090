@@ -93,7 +93,7 @@ class ChatResponse(BaseModel):
 def _sse_event(event_type: str, data: dict | str) -> str:
     """格式化为 SSE 事件"""
     payload = json.dumps(data, ensure_ascii=False) if isinstance(data, dict) else data
-    return f"event: {event_type}\ndata: {payload}\n\n"
+    return f"event: {event_type}\ndata: {payload}\n"
 
 
 # ============================================================
@@ -483,7 +483,7 @@ async def session_event_stream(request: Request, session_id: str):
             events_key,
             max_count=MessageBusKeys.SESSION_REPLAY_MAX_LEN,
         ):
-            yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+            yield f"data: {json.dumps(event, ensure_ascii=False)}\n"
 
         # 2. 订阅实时事件
         queue: asyncio.Queue[dict | None] = asyncio.Queue()
@@ -507,10 +507,10 @@ async def session_event_stream(request: Request, session_id: str):
                     item = await asyncio.wait_for(queue.get(), timeout=30)
                     if item is None:
                         break
-                    yield f"data: {json.dumps(item, ensure_ascii=False)}\n\n"
+                    yield f"data: {json.dumps(item, ensure_ascii=False)}\n"
                 except asyncio.TimeoutError:
                     # 心跳
-                    yield ":\n\n"
+                    yield ":\n"
         finally:
             feeder_task.cancel()
             try:

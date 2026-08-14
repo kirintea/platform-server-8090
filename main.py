@@ -146,6 +146,17 @@ def setup_logging(log_dir: str, log_level: str, backup_count: int) -> None:
     file_handler.setFormatter(formatter)
     root.addHandler(file_handler)
 
+    # 3. 抑制第三方库的 DEBUG 噪音（OTel 已覆盖请求追踪，日志只需保留应用层信息）
+    _NOISY_LOGGERS = [
+        "openai",           # openai SDK — dump 整个请求 JSON（含 prompt / tool 定义）
+        "httpcore",         # HTTP 连接底层细节（connect/send/receive 逐步日志）
+        "httpx",            # HTTP 请求摘要（已有 OTel span 覆盖）
+        "redis.asyncio",    # Redis 协议细节
+        "asyncio",          # 事件循环内部日志
+    ]
+    for name in _NOISY_LOGGERS:
+        logging.getLogger(name).setLevel(logging.WARNING)
+
     logging.getLogger(__name__).info(
         "日志已配置: file=%s, level=%s, backup=%d",
         log_file, log_level, backup_count,
