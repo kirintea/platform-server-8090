@@ -12,13 +12,12 @@
 
 from __future__ import annotations
 
-import logging
 import os
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
 
-logger = logging.getLogger(__name__)
+from loguru import logger
 
 
 @dataclass

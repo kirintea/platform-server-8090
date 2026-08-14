@@ -12,14 +12,12 @@
 
 from __future__ import annotations
 
-import logging
-
 from fastapi import APIRouter, HTTPException, Request, status
 from pydantic import BaseModel, Field
 
 from core.storage_models import AgentData, AgentRecord
 
-logger = logging.getLogger(__name__)
+from loguru import logger
 
 router = APIRouter(prefix="/agent", tags=["agent"])
 

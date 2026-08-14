@@ -9,14 +9,13 @@
 
 from __future__ import annotations
 
-import logging
 import os
 
 from fastapi import APIRouter, HTTPException, Request, status
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
-logger = logging.getLogger(__name__)
+from loguru import logger
 
 router = APIRouter(prefix="/workspace", tags=["workspace"])
 

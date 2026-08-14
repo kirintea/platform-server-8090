@@ -17,13 +17,11 @@
 
 from __future__ import annotations
 
-import logging
-
 import asyncpg
 
 from core.config.schemas import DatabaseConfig
 
-logger = logging.getLogger(__name__)
+from loguru import logger
 
 # ============================================================
 # DDL 建表语句（幂等操作，可重复执行）
@@ -249,7 +247,7 @@ class DatabaseManager:
             command_timeout=30,
         )
         logger.info(
-            "DatabaseManager: 连接池已创建 (pool_size=%d)",
+            "DatabaseManager: 连接池已创建 (pool_size={})",
             self._config.pool_size,
         )
 
@@ -278,7 +276,7 @@ class DatabaseManager:
                     await conn.execute(ddl)
                 except Exception as e:
                     # 索引已存在等错误可忽略
-                    logger.warning("DDL 执行警告: %s", e)
+                    logger.warning("DDL 执行警告: {}", e)
 
         logger.info("DatabaseManager: DDL 建表完成")
 

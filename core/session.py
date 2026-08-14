@@ -20,7 +20,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import logging
 import time
 from dataclasses import dataclass, field
 
@@ -33,7 +32,7 @@ from agentscope.message import AssistantMsg, UserMsg
 from core.agent import AgentFactory
 from core.config.schemas import AppConfig
 
-logger = logging.getLogger(__name__)
+from loguru import logger
 
 
 @dataclass
@@ -96,7 +95,7 @@ class SessionManager:
             decode_responses=True,
         )
         await self._redis.ping()
-        logger.info("SessionManager: Redis 连接成功 (%s)", self._redis_url)
+        logger.info("SessionManager: Redis 连接成功 ({})", self._redis_url)
 
     async def shutdown(self) -> None:
         """关闭 Redis 连接。"""
@@ -160,7 +159,7 @@ class SessionManager:
             )
             self._sessions[key] = entry
             logger.info(
-                "新建会话: user=%s session=%s (恢复=%s, 当前 %d 个会话)",
+                "新建会话: user={} session={} (恢复={}, 当前 {} 个会话)",
                 user_id, session_id,
                 "Redis" if saved_state else "无",
                 len(self._sessions),
@@ -193,7 +192,7 @@ class SessionManager:
                 if engine is not None:
                     engine.context = new_state.permission_context
                 logger.debug(
-                    "refresh_state 成功: user=%s session=%s",
+                    "refresh_state 成功: user={} session={}",
                     user_id, session_id,
                 )
             entry.touch()
@@ -313,17 +312,17 @@ class SessionManager:
                     raise
                 except Exception:
                     logger.exception(
-                        "fork_session 落库失败（含父会话补写）: user=%s parent=%s",
+                        "fork_session 落库失败（含父会话补写）: user={} parent={}",
                         user_id, parent_session_id,
                     )
             except Exception:
                 logger.exception(
-                    "fork_session 落库失败: user=%s parent=%s",
+                    "fork_session 落库失败: user={} parent={}",
                     user_id, parent_session_id,
                 )
 
         logger.info(
-            "fork 会话成功: user=%s parent=%s child=%s",
+            "fork 会话成功: user={} parent={} child={}",
             user_id, parent_session_id, child_session_id,
         )
         return child_session_id
@@ -366,7 +365,7 @@ class SessionManager:
         if entry:
             # 先保存最终状态到 Redis（可选：也可直接删除）
             await self._save_state(user_id, session_id, entry.agent)
-            logger.info("移除会话: user=%s session=%s", user_id, session_id)
+            logger.info("移除会话: user={} session={}", user_id, session_id)
             return True
         return False
 
@@ -423,14 +422,14 @@ class SessionManager:
                             meta = json.loads(meta_json)
                             sessions.append(meta)
                     except Exception:
-                        logger.warning("解析会话元数据失败: %s", key)
+                        logger.warning("解析会话元数据失败: {}", key)
                 if cursor == 0:
                     break
 
             # 按 last_active 倒序
             sessions.sort(key=lambda s: s.get("last_active", 0), reverse=True)
         except Exception:
-            logger.exception("扫描用户会话失败: user=%s", user_id)
+            logger.exception("扫描用户会话失败: user={}", user_id)
 
         return sessions
 
@@ -477,7 +476,7 @@ class SessionManager:
                 key, json.dumps(meta, ensure_ascii=False), ex=self._session_ttl
             )
         except Exception:
-            logger.exception("保存会话元数据失败: user=%s session=%s", user_id, session_id)
+            logger.exception("保存会话元数据失败: user={} session={}", user_id, session_id)
 
     async def _load_session_meta(self, user_id: str, session_id: str) -> dict | None:
         """从 Redis 加载会话元数据"""
@@ -489,7 +488,7 @@ class SessionManager:
             if meta_json:
                 return json.loads(meta_json)
         except Exception:
-            logger.exception("加载会话元数据失败: user=%s session=%s", user_id, session_id)
+            logger.exception("加载会话元数据失败: user={} session={}", user_id, session_id)
         return None
 
     async def get_session_messages(
@@ -546,7 +545,7 @@ class SessionManager:
                         "content": text,
                     })
         except Exception:
-            logger.exception("提取消息历史失败: user=%s session=%s", user_id, session_id)
+            logger.exception("提取消息历史失败: user={} session={}", user_id, session_id)
 
         return messages
 
@@ -568,9 +567,9 @@ class SessionManager:
                 result = await self._redis.delete(state_key, meta_key)
                 deleted = result > 0
             except Exception:
-                logger.exception("删除会话 Redis 数据失败: user=%s session=%s", user_id, session_id)
+                logger.exception("删除会话 Redis 数据失败: user={} session={}", user_id, session_id)
 
-        logger.info("删除会话: user=%s session=%s deleted=%s", user_id, session_id, deleted)
+        logger.info("删除会话: user={} session={} deleted={}", user_id, session_id, deleted)
         return deleted
 
     async def cleanup(self) -> int:
@@ -612,9 +611,9 @@ class SessionManager:
             key = self._redis_key(user_id, session_id)
             state_json = agent.state.model_dump_json()
             await self._redis.set(key, state_json, ex=self._session_ttl)
-            logger.debug("状态已保存: %s (%d bytes)", key, len(state_json))
+            logger.debug("状态已保存: {} ({} bytes)", key, len(state_json))
         except Exception:
-            logger.exception("保存状态失败: user=%s session=%s", user_id, session_id)
+            logger.exception("保存状态失败: user={} session={}", user_id, session_id)
 
     async def _load_state(
         self,
@@ -629,10 +628,10 @@ class SessionManager:
             state_json = await self._redis.get(key)
             if state_json:
                 state = AgentState.model_validate_json(state_json)
-                logger.debug("从 Redis 恢复状态: %s", key)
+                logger.debug("从 Redis 恢复状态: {}", key)
                 return state
         except Exception:
-            logger.exception("加载状态失败: user=%s session=%s", user_id, session_id)
+            logger.exception("加载状态失败: user={} session={}", user_id, session_id)
         return None
 
     async def _backfill_from_pg(
@@ -680,12 +679,12 @@ class SessionManager:
             state = AgentState(session_id=session_id)
             state.context = context
             logger.info(
-                "PG 回填成功: user=%s session=%s, 加载 %d 条消息",
+                "PG 回填成功: user={} session={}, 加载 {} 条消息",
                 user_id, session_id, len(context),
             )
             return state
         except Exception:
-            logger.exception("PG 回填失败: user=%s session=%s", user_id, session_id)
+            logger.exception("PG 回填失败: user={} session={}", user_id, session_id)
             return None
 
     # ------------------------------------------------------------------
@@ -704,5 +703,5 @@ class SessionManager:
             # 过期前保存状态到 Redis（TTL 会续期）
             entry = self._sessions.pop(key)
             await self._save_state(uid, sid, entry.agent)
-            logger.info("清理过期会话: user=%s session=%s", uid, sid)
+            logger.info("清理过期会话: user={} session={}", uid, sid)
         return len(expired)

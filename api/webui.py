@@ -14,7 +14,6 @@ WebUI 前端期望的 API 格式与我们现有后端有差异：
 
 from __future__ import annotations
 
-import logging
 from datetime import datetime
 from typing import Any
 
@@ -34,7 +33,7 @@ from core.storage_models import (
     _generate_id,
 )
 
-logger = logging.getLogger(__name__)
+from loguru import logger
 
 router = APIRouter(prefix="/webui", tags=["webui-compat"])
 

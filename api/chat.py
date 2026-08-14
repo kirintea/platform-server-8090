@@ -19,7 +19,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import logging
 import uuid
 from typing import AsyncGenerator
 
@@ -30,7 +29,7 @@ from pydantic import BaseModel, Field
 from agentscope.event import EventType
 from agentscope.message import Msg, UserMsg
 
-logger = logging.getLogger(__name__)
+from loguru import logger
 
 router = APIRouter()
 
@@ -187,7 +186,7 @@ async def chat_stream(request: Request, body: ChatRequest):
                     case EventType.TOOL_CALL_START:
                         tool_call_id = getattr(event, "tool_call_id", "")
                         tool_name = getattr(event, "tool_call_name", "")
-                        logger.info("TOOL_CALL_START: id=%s name=%s", tool_call_id, tool_name)
+                        logger.info("TOOL_CALL_START: id={} name={}", tool_call_id, tool_name)
                         pending_tool_calls[tool_call_id] = {
                             "name": tool_name,
                             "args_buffer": "",
@@ -196,7 +195,7 @@ async def chat_stream(request: Request, body: ChatRequest):
                     case EventType.TOOL_CALL_DELTA:
                         tool_call_id = getattr(event, "tool_call_id", "")
                         delta = getattr(event, "delta", "")
-                        logger.info("TOOL_CALL_DELTA: id=%s delta=%s", tool_call_id, delta[:100] if delta else "")
+                        logger.info("TOOL_CALL_DELTA: id={} delta={}", tool_call_id, delta[:100] if delta else "")
                         if tool_call_id in pending_tool_calls:
                             pending_tool_calls[tool_call_id]["args_buffer"] += delta
 
@@ -212,7 +211,7 @@ async def chat_stream(request: Request, body: ChatRequest):
                                     args = json.loads(tool_info["args_buffer"])
                                 except:
                                     args = tool_info["args_buffer"]
-                            logger.info("TOOL_CALL_END: id=%s name=%s args=%s", tool_call_id, tool_info["name"], str(args)[:200] if args else None)
+                            logger.info("TOOL_CALL_END: id={} name={} args={}", tool_call_id, tool_info["name"], str(args)[:200] if args else None)
                             yield _sse_event("tool_call", {
                                 "tool_name": tool_info["name"],
                                 "tool_call_id": tool_call_id,
@@ -222,7 +221,7 @@ async def chat_stream(request: Request, body: ChatRequest):
                     case EventType.TOOL_RESULT_START:
                         tool_call_id = getattr(event, "tool_call_id", "")
                         tool_name = getattr(event, "tool_call_name", "")
-                        logger.info("TOOL_RESULT_START: id=%s name=%s", tool_call_id, tool_name)
+                        logger.info("TOOL_RESULT_START: id={} name={}", tool_call_id, tool_name)
                         pending_tool_results[tool_call_id] = ""
 
                     case EventType.TOOL_RESULT_TEXT_DELTA:
@@ -234,7 +233,7 @@ async def chat_stream(request: Request, body: ChatRequest):
                     case EventType.TOOL_RESULT_END:
                         tool_call_id = getattr(event, "tool_call_id", "")
                         result_text = pending_tool_results.pop(tool_call_id, "")
-                        logger.info("TOOL_RESULT_END: id=%s result=%s", tool_call_id, result_text[:200] if result_text else "")
+                        logger.info("TOOL_RESULT_END: id={} result={}", tool_call_id, result_text[:200] if result_text else "")
                         yield _sse_event("tool_result", {
                             "tool_call_id": tool_call_id,
                             "state": str(getattr(event, "state", "")),

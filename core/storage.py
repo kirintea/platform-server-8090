@@ -14,7 +14,6 @@
 from __future__ import annotations
 
 import json
-import logging
 from datetime import datetime
 
 from core.database import DatabaseManager
@@ -31,7 +30,7 @@ from core.storage_models import (
     _generate_id,
 )
 
-logger = logging.getLogger(__name__)
+from loguru import logger
 
 
 class PostgresStorage:

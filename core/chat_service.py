@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import logging
 from typing import Any
 
 from agentscope.app.message_bus import MessageBus
@@ -25,7 +24,7 @@ from agentscope.message import Msg, UserMsg
 
 from core.session import SessionManager
 
-logger = logging.getLogger(__name__)
+from loguru import logger
 
 
 class ChatService:
@@ -142,7 +141,7 @@ class ChatService:
                 await self._session_mgr.save(user_id, session_id)
 
             except Exception as e:
-                logger.exception("Chat run 异常: user=%s session=%s", user_id, session_id)
+                logger.exception("Chat run 异常: user={} session={}", user_id, session_id)
                 await self._publish_event(events_key, {
                     "type": "error",
                     "message": str(e),

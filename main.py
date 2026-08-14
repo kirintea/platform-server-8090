@@ -23,13 +23,15 @@
 from __future__ import annotations
 
 import logging
-import logging.handlers
 import os
 import sys
 import threading
 import webbrowser
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
+
+import zoneinfo
+from loguru import logger
 
 import uvicorn
 from dotenv import load_dotenv
@@ -57,110 +59,81 @@ from core.storage import PostgresStorage
 from core.tracing import TracingSetup
 from core.workspace import LocalWorkspaceManager
 
-logger = logging.getLogger(__name__)
-
 
 # ============================================================
-# 0. 日志配置
+# 0. 日志配置 (loguru)
 # ============================================================
 
-class BeijingTimedRotatingFileHandler(logging.handlers.TimedRotatingFileHandler):
-    """按北京时间 00:00 轮转日志，同时支持文件大小限制（>50MB 立即轮转）"""
+class _InterceptHandler(logging.Handler):
+    """标准 logging → loguru 桥接（拦截第三方库日志）"""
 
-    _TZ = None
-
-    @classmethod
-    def _get_tz(cls):
-        if cls._TZ is None:
-            try:
-                import zoneinfo
-                cls._TZ = zoneinfo.ZoneInfo("Asia/Shanghai")
-            except ImportError:
-                # Python < 3.9 fallback（不会走到，3.12 必有）
-                cls._TZ = None
-        return cls._TZ
-
-    def computeRollover(self, currentTime):
-        """计算下一次轮转时间：北京时间次日 00:00"""
-        tz = self._get_tz()
-        if tz:
-            now = datetime.fromtimestamp(currentTime, tz=tz)
-            tomorrow = (now + timedelta(days=1)).replace(
-                hour=0, minute=0, second=0, microsecond=0,
-            )
-            return int(tomorrow.timestamp())
-        # fallback: 使用父类逻辑（本地时间 midnight）
-        return super().computeRollover(currentTime)
-
-    def shouldRollover(self, record):
-        """日期轮转 或 文件 >50MB 时轮转"""
-        if super().shouldRollover(record):
-            return True
+    def emit(self, record: logging.LogRecord) -> None:
         try:
-            if self.stream and self.stream.tell() > 50 * 1024 * 1024:
-                return True
-        except Exception:
-            pass
-        return False
+            level = logger.level(record.levelname).name
+        except ValueError:
+            level = record.levelno
+        logger.opt(depth=6, exception=record.exc_info).log(level, record.getMessage())
+
+
+_TZ_SHANGHAI = zoneinfo.ZoneInfo("Asia/Shanghai")
+
+
+def _beijing_rotation(message, file) -> bool:
+    """北京时间 00:00 或文件 >50MB 时轮转"""
+    # 文件大小轮转
+    if file.tell() > 50 * 1024 * 1024:
+        return True
+    # 时间轮转：计算距下一个北京时间 00:00 的秒数
+    now = datetime.now(_TZ_SHANGHAI)
+    tomorrow = (now + timedelta(days=1)).replace(
+        hour=0, minute=0, second=0, microsecond=0,
+    )
+    return (tomorrow - now).total_seconds()
 
 
 def setup_logging(log_dir: str, log_level: str, backup_count: int) -> None:
-    """配置 root logger：控制台 + 文件双输出
+    """配置 loguru 日志：异步写盘 + 北京时区轮转 + 第三方库拦截
 
     Args:
         log_dir: 日志文件目录
         log_level: 日志级别
         backup_count: 日志保留天数
     """
-    # 创建日志目录
     os.makedirs(log_dir, exist_ok=True)
     log_file = os.path.join(log_dir, "platform-server.log")
 
-    # 日志格式
-    fmt = "%(asctime)s | %(levelname)-7s | %(process)d | %(name)s | %(message)s"
-    datefmt = "%Y-%m-%d %H:%M:%S"
-    formatter = logging.Formatter(fmt, datefmt=datefmt)
+    # 移除 loguru 默认 handler
+    logger.remove()
 
-    # Root logger
-    root = logging.getLogger()
-    root.setLevel(getattr(logging, log_level.upper(), logging.INFO))
-
-    # 清除已有 handler（避免重复添加）
-    root.handlers.clear()
-
-    # 1. 控制台 handler → stderr
-    console = logging.StreamHandler(sys.stderr)
-    console.setFormatter(formatter)
-    root.addHandler(console)
-
-    # 2. 文件 handler → logs/platform-server.log（北京时间 00:00 轮转）
-    file_handler = BeijingTimedRotatingFileHandler(
-        filename=log_file,
-        when="midnight",
-        interval=1,
-        backupCount=backup_count,
-        encoding="utf-8",
-        delay=True,  # 延迟创建文件（多 worker 安全）
+    # 1. 控制台输出 → stderr（带颜色）
+    logger.add(
+        sys.stderr,
+        level=log_level.upper(),
+        format="<green>{time:YYYY-MM-DD HH:mm:ss}</green> | "
+               "<level>{level: <7}</level> | "
+               "<cyan>{process}</cyan> | "
+               "<cyan>{name}</cyan> | "
+               "<level>{message}</level>",
+        colorize=True,
     )
-    file_handler.suffix = "%Y-%m-%d"
-    file_handler.setFormatter(formatter)
-    root.addHandler(file_handler)
 
-    # 3. 抑制第三方库的 DEBUG 噪音（OTel 已覆盖请求追踪，日志只需保留应用层信息）
-    _NOISY_LOGGERS = [
-        "openai",           # openai SDK — dump 整个请求 JSON（含 prompt / tool 定义）
-        "httpcore",         # HTTP 连接底层细节（connect/send/receive 逐步日志）
-        "httpx",            # HTTP 请求摘要（已有 OTel span 覆盖）
-        "redis.asyncio",    # Redis 协议细节
-        "asyncio",          # 事件循环内部日志
-    ]
-    for name in _NOISY_LOGGERS:
+    # 2. 文件输出（异步写盘，北京时间 00:00 或 >50MB 轮转）
+    logger.add(
+        log_file,
+        level=log_level.upper(),
+        format="{time:YYYY-MM-DD HH:mm:ss} | {level: <7} | {process} | {name} | {message}",
+        rotation=_beijing_rotation,
+        retention=f"{backup_count} days",
+        encoding="utf-8",
+        enqueue=True,   # 异步写盘，不阻塞事件循环
+    )
+
+    # 3. 桥接标准 logging → loguru（拦截第三方库 DEBUG 噪音）
+    logging.basicConfig(handlers=[_InterceptHandler()], level=0, force=True)
+    for name in ("openai", "httpcore", "httpx", "redis.asyncio", "asyncio"):
         logging.getLogger(name).setLevel(logging.WARNING)
 
-    logging.getLogger(__name__).info(
-        "日志已配置: file=%s, level=%s, backup=%d",
-        log_file, log_level, backup_count,
-    )
+    logger.info("日志已配置: file={}, level={}, backup={}", log_file, log_level, backup_count)
 
 
 # ============================================================
@@ -180,7 +153,7 @@ setup_logging(
 # ============================================================
 if config.otel.enabled:
     TracingSetup.init(config.otel)
-    logger.info("OTel 追踪已初始化: %s", config.otel.endpoint)
+    logger.info("OTel 追踪已初始化: {}", config.otel.endpoint)
 
 
 # ============================================================
@@ -204,7 +177,7 @@ async def lifespan(app: FastAPI):
     message_bus = RedisMessageBus(config.redis.url)
     await message_bus.initialize()
     app.state.message_bus = message_bus
-    logger.info("消息总线已就绪 (RedisMessageBus: %s)", config.redis.url)
+    logger.info("消息总线已就绪 (RedisMessageBus: {})", config.redis.url)
 
     # 创建会话管理器（Agent 实例按需创建）
     session_mgr = SessionManager(
@@ -217,7 +190,7 @@ async def lifespan(app: FastAPI):
     # 初始化 Redis 连接
     await session_mgr.initialize()
     app.state.session_manager = session_mgr
-    logger.info("会话管理器已就绪 (Redis: %s)", config.redis.url)
+    logger.info("会话管理器已就绪 (Redis: {})", config.redis.url)
 
     # 创建工作区管理器
     workspace_mgr = LocalWorkspaceManager(base_dir="./workspaces")
@@ -300,7 +273,7 @@ if __name__ == "__main__":
 
     if workers > 1:
         # 多 worker 必须用 import string（uvicorn 子进程会重新 import 模块）
-        logger.info("启动模式: 多 Worker (%d workers)", workers)
+        logger.info("启动模式: 多 Worker ({} workers)", workers)
         uvicorn.run(
             "main:app",
             host=config.server.host,
