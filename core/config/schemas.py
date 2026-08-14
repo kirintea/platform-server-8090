@@ -48,6 +48,13 @@ class ToolGuardConfig(BaseModel):
     tools: list[str] = Field(default_factory=list, description="工具列表 (支持通配符, 如 'Bash:*')")
 
 
+class CommandGuardConfig(BaseModel):
+    """命令内容安全守卫配置"""
+    enabled: bool = Field(default=False, description="是否启用命令守卫")
+    mode: str = Field(default="blocklist", description="模式: allowlist / blocklist")
+    rules: list[str] = Field(default_factory=list, description="命令匹配规则 (fnmatch 通配符)")
+
+
 class AgentConfig(BaseModel):
     """Agent 行为配置"""
     name: str = Field(default="platform_agent", description="Agent 名称")
@@ -57,6 +64,7 @@ class AgentConfig(BaseModel):
     context_reserve_ratio: float = Field(default=0.1, description="压缩后保留比例")
     permission_mode: str = Field(default="bypass", description="权限模式: auto / bypass")
     tool_guard: ToolGuardConfig = Field(default_factory=ToolGuardConfig, description="工具守卫配置")
+    command_guard: CommandGuardConfig = Field(default_factory=CommandGuardConfig, description="命令内容守卫配置")
 
 
 class MCPConfig(BaseModel):

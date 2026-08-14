@@ -5,26 +5,33 @@
 通过 AgentScope 的 MiddlewareBase 在 on_acting 钩子中拦截工具调用。
 支持 allowlist（白名单）和 blocklist（黑名单）两种模式，工具名支持通配符。
 
+仅做工具名级匹配，不解析命令内容。
+命令内容的安全检测由 command_guard.py 负责。
+
 配置示例 (configs/dev.yaml):
     agent:
       tool_guard:
         enabled: true
-        mode: "blocklist"        # allowlist | blocklist
+        mode: "allowlist"        # allowlist | blocklist
         tools:
-          - "Bash:rm -rf *"     # 拦截危险的 rm 命令
-          - "Write:/etc/*"      # 拦截写入系统目录
+          - "Read"               # 按工具名匹配
+          - "Glob"
+          - "Grep"
 """
 
 from __future__ import annotations
 
 import fnmatch
+import logging
 from typing import Any
 
 from agentscope.middleware import MiddlewareBase
-from agentscope.message import TextBlock, ToolCallBlock, ToolResultState
+from agentscope.message import TextBlock, ToolResultState
 from agentscope.tool import ToolResponse
 
 from core.config.schemas import ToolGuardConfig
+
+logger = logging.getLogger(__name__)
 
 
 class ToolGuardMiddleware(MiddlewareBase):
@@ -40,7 +47,12 @@ class ToolGuardMiddleware(MiddlewareBase):
     # MiddlewareBase 钩子
     # ------------------------------------------------------------------
 
-    async def on_acting(self, agent: Any, input_kwargs: dict, next_handler: Any):
+    async def on_acting(
+        self,
+        agent: Any,
+        input_kwargs: dict,
+        next_handler: Any,
+    ):
         """拦截工具执行阶段
 
         on_acting 是逐个工具调用的洋葱钩子，input_kwargs 中包含:
@@ -54,20 +66,22 @@ class ToolGuardMiddleware(MiddlewareBase):
                 yield item
             return
 
-        tool_call: ToolCallBlock = input_kwargs["tool_call"]
-        tool_name = tool_call.name
-        tool_input = tool_call.input  # JSON 字符串，如 '"pwd"' 或 '{"command":"ls"}'
-        tool_signature = f"{tool_name}:{tool_input}" if tool_input else tool_name
+        tool_call = input_kwargs["tool_call"]
+        tool_name: str = tool_call.name
 
-        if not self._is_blocked(tool_signature):
+        if not self._is_blocked(tool_name):
             async for item in next_handler(**input_kwargs):
                 yield item
             return
 
-        # 被拦截 — 构造拒绝结果，不调用 next_handler
+        logger.info(
+            "ToolGuard [%s] 拦截工具: %s", self._mode, tool_name,
+        )
         yield ToolResponse(
             id=tool_call.id,
-            content=[TextBlock(text=f"[ToolGuard] 工具调用被拦截: {tool_signature}")],
+            content=[TextBlock(
+                text=f"[ToolGuard] 工具被拦截 ({self._mode}): {tool_name}",
+            )],
             state=ToolResultState.DENIED,
         )
 
@@ -75,18 +89,17 @@ class ToolGuardMiddleware(MiddlewareBase):
     # 规则匹配
     # ------------------------------------------------------------------
 
-    def _is_blocked(self, tool_signature: str) -> bool:
-        """判断工具签名是否被拦截
+    def _is_blocked(self, tool_name: str) -> bool:
+        """判断工具名是否被拦截
 
         Args:
-            tool_signature: "tool_name:arguments" 格式的签名
+            tool_name: 工具名 (如 "Bash", "Read")
 
         Returns:
             True 表示应被拦截
         """
         matched = any(
-            fnmatch.fnmatch(tool_signature, pattern) or
-            fnmatch.fnmatch(tool_signature.split(":")[0], pattern)
+            fnmatch.fnmatch(tool_name, pattern)
             for pattern in self._rules
         )
 

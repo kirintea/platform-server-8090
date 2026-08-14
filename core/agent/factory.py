@@ -35,6 +35,7 @@ from agentscope.skill import LocalSkillLoader
 from core.config.schemas import AppConfig, LLMConfig, MCPConfig
 from core.formatter import SiliconFlowFormatter
 from middleware.tool_guard import ToolGuardMiddleware
+from middleware.command_guard import CommandGuardMiddleware
 
 
 class AgentFactory:
@@ -199,8 +200,16 @@ class AgentFactory:
         if config.otel.enabled:
             middlewares.append(TracingMiddleware())
 
-        # 工具守卫中间件
+        # 工具守卫中间件（工具名级）
         if config.agent.tool_guard.enabled:
             middlewares.append(ToolGuardMiddleware(config.agent.tool_guard))
+
+        # 命令内容守卫中间件（命令内容级）
+        if config.agent.command_guard.enabled:
+            middlewares.append(CommandGuardMiddleware(
+                enabled=True,
+                mode=config.agent.command_guard.mode,
+                rules=config.agent.command_guard.rules,
+            ))
 
         return middlewares

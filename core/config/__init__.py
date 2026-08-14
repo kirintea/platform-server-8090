@@ -3,6 +3,7 @@
 from .schemas import (
     AgentConfig,
     AppConfig,
+    CommandGuardConfig,
     DatabaseConfig,
     LLMConfig,
     MCPConfig,
@@ -17,6 +18,7 @@ from .resolver import EnvVarResolver
 __all__ = [
     "AgentConfig",
     "AppConfig",
+    "CommandGuardConfig",
     "ConfigManager",
     "DatabaseConfig",
     "EnvVarResolver",

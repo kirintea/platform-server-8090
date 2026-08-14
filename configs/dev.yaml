@@ -62,6 +62,20 @@ agent:
     mode: "allowlist" # allowlist | blocklist
     tools: []
 
+  command_guard:
+    enabled: true
+    mode: "blocklist"           # allowlist | blocklist
+    rules:
+      - "rm -rf /"              # 拦截删根目录
+      - "rm -rf ~"              # 拦截删 home
+      - "rm -rf /*"             # 拦截删根目录通配
+      - "*|*bash*"              # 拦截管道执行 shell
+      - "*|*sh*"                # 拦截管道执行 sh
+      - "*/dev/tcp/*"           # 拦截 Bash 反弹 shell
+      - "Invoke-Expression*"    # 拦截 PowerShell 远程执行
+      - "certutil*"             # 拦截 Windows 下载
+      - "curl *|*"              # 拦截 curl 管道 (curl 下载可以，管道不行)
+
 # MCP 服务列表 (可选)
 mcp_servers: []
   # - name: "filesystem"
