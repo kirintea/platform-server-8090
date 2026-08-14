@@ -22,6 +22,7 @@
 
 from __future__ import annotations
 
+import atexit
 import os
 import sys
 import threading
@@ -50,7 +51,7 @@ from api.webui import router as webui_router
 from core.chat_service import ChatService
 from core.config import ConfigManager
 from core.database import DatabaseManager
-from core.log.logger import setup_logging
+from core.log.logger import setup_logging, flush_log_on_exit
 from core.redis_message_bus import RedisMessageBus
 from core.session import SessionManager
 from core.storage import PostgresStorage
@@ -69,6 +70,7 @@ setup_logging(
     log_level=config.server.log_level,
     backup_count=config.server.log_backup_count,
 )
+atexit.register(flush_log_on_exit)
 
 # ============================================================
 # 2. 初始化 OTel 追踪 (必须在 Agent 创建之前)
