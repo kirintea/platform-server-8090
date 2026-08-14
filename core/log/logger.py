@@ -1,26 +1,15 @@
 # -*- coding: utf-8 -*-
-"""loguru 日志配置模块
-
-职责：
-- 控制台 + 文件双输出
-- 异步写盘（enqueue=True），不阻塞 asyncio 事件循环
-- 北京时间次日 00:00 或文件 >50MB 自动轮转
-- 桥接标准 logging → loguru，拦截第三方库 DEBUG 噪音
-
-注意：
-- 多进程部署时每个进程必须使用独立日志文件，否则日志错乱
-"""
+"""loguru 日志配置模块"""
 
 import logging
 import sys
-from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
 
 try:
     from zoneinfo import ZoneInfo
 except ImportError:
-    from backports.zoneinfo import ZoneInfo
+    from backports.zoneinfo import ZoneInfo  # type: ignore
 
 from loguru import logger
 
@@ -28,43 +17,11 @@ from loguru import logger
 # 常量
 # ============================================================
 _TZ_SHANGHAI = ZoneInfo("Asia/Shanghai")
-_LOG_ROTATE_SIZE = 50 * 1024 * 1024  # 50MB
 _NOISE_LOG_LIBS = (
     "openai", "httpcore", "httpx",
     "redis.asyncio", "asyncio",
     "uvicorn", "urllib3",
 )
-
-
-# ============================================================
-# 轮转回调
-# ============================================================
-def _next_beijing_midnight() -> datetime:
-    """计算下一个北京时间 00:00"""
-    now = datetime.now(_TZ_SHANGHAI)
-    midnight = now.replace(hour=0, minute=0, second=0, microsecond=0)
-    if midnight <= now:
-        midnight += timedelta(days=1)
-    return midnight
-
-
-def _beijing_rotation(message, file) -> bool | datetime:
-    """北京时间次日 00:00 或文件 >50MB 时轮转
-
-    返回值语义（loguru 约定）：
-    - datetime → 轮转时刻，到达该时间后轮转并自动计算下一个北京时间零点
-    - True     → 立即轮转（文件超限）
-    - False    → 不轮转
-    """
-    try:
-        file.seek(0, 2)
-        if file.tell() > _LOG_ROTATE_SIZE:
-            return True
-    except (OSError, ValueError):
-        pass
-
-    return _next_beijing_midnight()
-
 
 # ============================================================
 # logging 桥接器
@@ -77,9 +34,11 @@ class _InterceptHandler(logging.Handler):
             level = logger.level(record.levelname).name
         except ValueError:
             level = record.levelno
-        logger.opt(depth=6, exception=record.exc_info, diagnose=False).log(
-            level, record.getMessage()
-        )
+        
+        logger.opt(
+            depth=6,
+            exception=record.exc_info,
+        ).log(level, record.getMessage())
 
 
 # ============================================================
@@ -98,9 +57,6 @@ def setup_logging(
         log_level: DEBUG / INFO / WARNING / ERROR
         backup_count: 日志保留天数
         dev_mode: None=自动判断, True=强制彩色, False=强制无色
-
-    Raises:
-        ValueError: log_level 不合法
     """
     valid_levels = {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}
     log_level = log_level.upper()
@@ -109,8 +65,11 @@ def setup_logging(
 
     log_path = Path(log_dir)
     log_path.mkdir(exist_ok=True, parents=True)
+    
+    # 当前活跃日志文件（不带日期）
     log_file = str(log_path / "platform-server.log")
 
+    # 清除所有已添加的 sink
     logger.remove()
 
     # Windows 旧终端不支持 ANSI 彩色
@@ -131,15 +90,16 @@ def setup_logging(
         diagnose=False,
     )
 
-    # 2. 文件（异步写盘）
+    # 2. 文件（按天轮转，异步写盘）
+    # loguru 会自动将轮转后的文件命名为 platform-server.log.YYYY-MM-DD
     logger.add(
         log_file,
         level=log_level,
         format="{time:YYYY-MM-DD HH:mm:ss} | {level: <7} | {process} | {name}:{function}:{line} | {message}",
-        rotation=_beijing_rotation,
-        retention=f"{backup_count} days",
+        rotation="1 day",  # 每天轮转一次
+        retention=f"{backup_count} days",  # 保留 N 天的日志
         encoding="utf-8",
-        enqueue=True,
+        enqueue=True,  # 异步写盘
         colorize=False,
         diagnose=False,
     )
@@ -166,3 +126,29 @@ def _reset_origin_logging() -> None:
 def flush_log_on_exit() -> None:
     """程序退出时刷新异步队列，防止日志丢失"""
     logger.complete()
+
+
+# # ============================================================
+# # 测试代码
+# # ============================================================
+# if __name__ == "__main__":
+#     setup_logging(log_dir="./logs", log_level="DEBUG")
+    
+#     logger.debug("这是 DEBUG 日志")
+#     logger.info("这是 INFO 日志")
+#     logger.warning("这是 WARNING 日志")
+#     logger.error("这是 ERROR 日志")
+    
+#     # 测试大量日志
+#     import time
+#     print("\n开始写入测试日志...")
+#     for i in range(100):
+#         logger.info(f"测试日志第 {i+1} 条")
+#         if i % 10 == 0:
+#             print(f"已写入 {i+1} 条日志")
+#         time.sleep(0.01)
+    
+#     print("日志写入完成，请检查 logs 目录")
+#     print("当前文件: platform-server.log")
+#     print("轮转后: platform-server.log.YYYY-MM-DD")
+#     flush_log_on_exit()
