@@ -28,6 +28,8 @@ import redis.asyncio as aioredis
 from agentscope.agent import Agent
 from agentscope.state import AgentState
 
+from agentscope.message import AssistantMsg, UserMsg
+
 from core.agent import AgentFactory
 from core.config.schemas import AppConfig
 
@@ -64,10 +66,12 @@ class SessionManager:
         session_ttl: int = 1800,
         max_sessions: int = 100,
         storage=None,
+        db=None,
     ) -> None:
         self._config = config
         self._session_ttl = session_ttl
         self._max_sessions = max_sessions
+        self._db = db  # DatabaseManager，用于 PG 回填
         # key: (user_id, session_id) → SessionEntry
         self._sessions: dict[tuple[str, str], SessionEntry] = {}
         self._lock = asyncio.Lock()
@@ -143,6 +147,10 @@ class SessionManager:
             # 尝试从 Redis 恢复 AgentState
             saved_state = await self._load_state(user_id, session_id)
 
+            # Redis 未命中时，尝试从 PG 回填历史消息
+            if saved_state is None:
+                saved_state = await self._backfill_from_pg(user_id, session_id)
+
             # 创建 Agent 实例（传入恢复的状态）
             agent = AgentFactory.create(self._config, state=saved_state)
             entry = SessionEntry(
@@ -152,8 +160,9 @@ class SessionManager:
             )
             self._sessions[key] = entry
             logger.info(
-                "新建会话: user=%s session=%s (从Redis恢复=%s, 当前 %d 个会话)",
-                user_id, session_id, saved_state is not None,
+                "新建会话: user=%s session=%s (恢复=%s, 当前 %d 个会话)",
+                user_id, session_id,
+                "Redis" if saved_state else "无",
                 len(self._sessions),
             )
             return agent
@@ -625,6 +634,59 @@ class SessionManager:
         except Exception:
             logger.exception("加载状态失败: user=%s session=%s", user_id, session_id)
         return None
+
+    async def _backfill_from_pg(
+        self,
+        user_id: str,
+        session_id: str,
+        limit: int = 50,
+    ) -> AgentState | None:
+        """从 PG 加载历史消息，构造 AgentState 用于恢复上下文
+
+        当 Redis 未命中时调用，将 PG 中最近 N 条消息转为 Msg 列表
+        注入 AgentState.context，使 Agent 能继续之前的对话。
+
+        Args:
+            user_id: 用户 ID
+            session_id: 会话 ID
+            limit: 加载消息条数上限
+
+        Returns:
+            AgentState 或 None（PG 无数据时）
+        """
+        if not self._db or not self._db.is_initialized:
+            return None
+        try:
+            result = await self._db.get_conversation_history(
+                user_id, session_id, limit=limit,
+            )
+            messages = result.get("messages", [])
+            if not messages:
+                return None
+
+            # 转换为 AgentScope Msg 对象
+            context = []
+            for msg in messages:
+                role = msg["role"]
+                content = msg["content"]
+                if role == "user":
+                    context.append(UserMsg(name="user", content=content))
+                elif role == "assistant":
+                    context.append(AssistantMsg(name="assistant", content=content))
+
+            if not context:
+                return None
+
+            state = AgentState(session_id=session_id)
+            state.context = context
+            logger.info(
+                "PG 回填成功: user=%s session=%s, 加载 %d 条消息",
+                user_id, session_id, len(context),
+            )
+            return state
+        except Exception:
+            logger.exception("PG 回填失败: user=%s session=%s", user_id, session_id)
+            return None
 
     # ------------------------------------------------------------------
     # 内部方法

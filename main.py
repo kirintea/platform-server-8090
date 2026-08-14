@@ -98,6 +98,7 @@ async def lifespan(app: FastAPI):
         session_ttl=config.redis.session_ttl,
         max_sessions=100,
         storage=storage,
+        db=db_mgr,
     )
     # 初始化 Redis 连接
     await session_mgr.initialize()
