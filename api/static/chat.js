@@ -81,6 +81,13 @@ async function switchSession(userId, sessionId) {
   // 加载消息历史
   try {
     const resp = await fetch(`/sessions/${encodeURIComponent(userId)}/${encodeURIComponent(sessionId)}/messages?limit=50`);
+
+    if (!resp.ok) {
+      const errBody = await resp.json().catch(() => ({}));
+      addMessage('error', `加载会话失败 (${resp.status}): ${errBody.detail || resp.statusText}`);
+      return;
+    }
+
     const data = await resp.json();
 
     const messages = data.messages || [];
@@ -300,6 +307,14 @@ function formatTime(timestamp) {
 }
 
 // ============ Session Management ============
+
+function refreshSessions() {
+  // 切换用户时清空当前会话
+  currentSessionId = '';
+  messagesEl.innerHTML = '';
+  sessionInfoEl.textContent = '会话: —';
+  loadSessionList();
+}
 
 function newSession() {
   currentSessionId = '';
@@ -561,8 +576,11 @@ inputEl.addEventListener('keydown', (e) => {
   }
 });
 
-// 用户 ID 变更时重新加载会话列表
+// 用户 ID 变更时清空当前会话并重新加载列表
 userIdEl.addEventListener('change', () => {
+  currentSessionId = '';
+  messagesEl.innerHTML = '';
+  sessionInfoEl.textContent = '会话: —';
   loadSessionList();
 });
 

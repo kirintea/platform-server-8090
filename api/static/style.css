@@ -76,6 +76,21 @@ body {
   outline: none;
 }
 .sidebar-header input:focus { border-color: var(--accent); }
+.btn-refresh {
+  flex-shrink: 0;
+  width: 32px;
+  height: 32px;
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 14px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.15s;
+}
+.btn-refresh:hover { background: var(--surface3); border-color: var(--accent); }
 
 .btn-new-session {
   display: flex;
