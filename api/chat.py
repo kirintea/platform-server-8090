@@ -35,6 +35,26 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
+async def _persist_conversation(
+    session_mgr,
+    db,
+    user_id: str,
+    session_id: str,
+    user_message: str,
+    assistant_reply: str,
+) -> None:
+    """后台异步持久化对话（Redis + PG）"""
+    try:
+        # 写 Redis
+        await session_mgr.save(user_id, session_id)
+        # 写 PG
+        if db and db.is_initialized:
+            await db.insert_conversation(user_id, session_id, "user", user_message)
+            await db.insert_conversation(user_id, session_id, "assistant", assistant_reply)
+    except Exception:
+        logger.exception("后台持久化失败")
+
+
 # ============================================================
 # 请求 / 响应 Schema
 # ============================================================
@@ -78,6 +98,7 @@ def _sse_event(event_type: str, data: dict | str) -> str:
 async def chat(request: Request, body: ChatRequest):
     """非流式对话 — 等待完整回复后返回"""
     session_mgr = request.app.state.session_manager
+    db = getattr(request.app.state, "database_manager", None)
 
     # 确保 session_id
     session_id = body.session_id or str(uuid.uuid4())
@@ -88,15 +109,21 @@ async def chat(request: Request, body: ChatRequest):
     user_msg = UserMsg(name="user", content=body.message)
     reply_msg = await agent.reply(user_msg)
 
-    # 持久化会话状态到 Redis
-    await session_mgr.save(body.user_id, session_id)
-
-    return ChatResponse(
+    # 先返回响应
+    response = ChatResponse(
         reply=reply_msg.get_text_content(),
         user_id=body.user_id,
         session_id=session_id,
         reply_id=getattr(reply_msg, "id", ""),
     )
+
+    # 后台异步持久化（不阻塞响应）
+    asyncio.create_task(_persist_conversation(
+        session_mgr, db, body.user_id, session_id,
+        body.message, reply_msg.get_text_content(),
+    ))
+
+    return response
 
 
 @router.post("/chat/stream")
@@ -112,6 +139,7 @@ async def chat_stream(request: Request, body: ChatRequest):
     - error          : 错误
     """
     session_mgr = request.app.state.session_manager
+    db = getattr(request.app.state, "database_manager", None)
     session_id = body.session_id or str(uuid.uuid4())
 
     agent = await session_mgr.get_or_create(body.user_id, session_id)
@@ -129,6 +157,9 @@ async def chat_stream(request: Request, body: ChatRequest):
         pending_tool_calls: dict[str, dict] = {}  # tool_call_id -> {name, args_buffer}
         pending_tool_results: dict[str, str] = {}  # tool_call_id -> result_buffer
 
+        # 累积完整回复内容，用于 PG 双写
+        full_reply = ""
+
         try:
             async for event in agent.reply_stream(user_msg):
                 if not hasattr(event, "type"):
@@ -141,6 +172,7 @@ async def chat_stream(request: Request, body: ChatRequest):
 
                 match event.type:
                     case EventType.TEXT_BLOCK_DELTA:
+                        full_reply += event.delta
                         yield _sse_event("text_delta", {"delta": event.delta})
 
                     case EventType.THINKING_BLOCK_DELTA:
@@ -216,8 +248,12 @@ async def chat_stream(request: Request, body: ChatRequest):
             logger.exception("流式回复异常")
             yield _sse_event("error", {"message": str(e)})
         finally:
-            # 持久化会话状态到 Redis
-            await session_mgr.save(body.user_id, session_id)
+            # 后台异步持久化（不阻塞流式响应）
+            if full_reply:
+                asyncio.create_task(_persist_conversation(
+                    session_mgr, db, body.user_id, session_id,
+                    body.message, full_reply,
+                ))
 
     return StreamingResponse(
         event_generator(),
@@ -250,53 +286,103 @@ async def list_sessions(request: Request, user_id: str | None = None):
 
 @router.get("/sessions/{user_id}")
 async def list_user_sessions(request: Request, user_id: str):
-    """列出指定用户的所有历史会话（从 Redis 扫描）
+    """列出指定用户的所有历史会话（从 PG 查询）
 
     返回会话元数据列表，包含标题、时间、消息数等信息。
     用于前端侧边栏展示。
     """
-    session_mgr = request.app.state.session_manager
-    sessions = await session_mgr.list_user_sessions(user_id)
+    db = getattr(request.app.state, "database_manager", None)
+    if not db or not db.is_initialized:
+        raise HTTPException(503, "数据库未配置")
 
-    # 补充 PG 中的 parent_session_id / depth（如果有）
-    storage = getattr(request.app.state, "storage", None)
-    if storage is not None:
-        sids = [s["session_id"] for s in sessions if "session_id" in s]
-        if sids:
-            # TODO(perf): storage.list_sessions 用 SELECT * 会拉取 state_json,
-            #             未来会话数多时应改为 list_session_lineage(user_id, sids) 只查血缘字段
-            recs = await storage.list_sessions(user_id)  # list[SessionRecord]
-            depth_map = {r.id: (r.parent_session_id, r.depth) for r in recs}
-            for s in sessions:
-                sid = s.get("session_id")
-                if sid in depth_map:
-                    p, d = depth_map[sid]
-                    s.setdefault("parent_session_id", p)
-                    s.setdefault("depth", d)
+    sessions = await db.get_user_sessions(user_id)
 
     return {"sessions": sessions, "total": len(sessions)}
 
 
 @router.get("/sessions/{user_id}/{session_id}/messages")
-async def get_session_messages(request: Request, user_id: str, session_id: str):
-    """获取会话的消息历史
+async def get_session_messages(
+    request: Request,
+    user_id: str,
+    session_id: str,
+    before_id: int | None = None,
+    limit: int = 50,
+):
+    """获取会话的消息历史（从 PG 查询，支持游标分页）
 
-    从 Redis 加载会话状态，返回消息列表。
-    用于前端切换会话时加载聊天记录。
+    Args:
+        before_id: 游标，获取此 ID 之前的消息（用于加载更多）
+        limit: 每页消息数，默认 50
+
+    用于前端切换会话时加载聊天记录，支持滚动加载更多。
     """
-    session_mgr = request.app.state.session_manager
-    messages = await session_mgr.get_session_messages(user_id, session_id)
-    if messages is None:
-        return {"error": "会话不存在", "messages": []}
-    return {"messages": messages, "total": len(messages)}
+    db = getattr(request.app.state, "database_manager", None)
+    if not db or not db.is_initialized:
+        raise HTTPException(503, "数据库未配置")
+
+    result = await db.get_conversation_history(
+        user_id, session_id,
+        before_id=before_id,
+        limit=limit,
+    )
+
+    return result
 
 
-@router.delete("/sessions/{user_id}/{session_id}")
-async def close_session(request: Request, user_id: str, session_id: str):
-    """删除指定会话（内存 + Redis 彻底删除）"""
+@router.post("/sessions/{user_id}/{session_id}/delete")
+async def soft_delete_session(request: Request, user_id: str, session_id: str):
+    """软删除会话（标记为 deleted，实际删除由数据部门处理）
+
+    - PG: 将 conversations 表中该会话所有消息标记为 deleted
+    - Redis: 清除会话状态
+    """
+    db = getattr(request.app.state, "database_manager", None)
     session_mgr = request.app.state.session_manager
-    removed = await session_mgr.delete_session(user_id, session_id)
-    return {"removed": removed}
+
+    # PG 软删除
+    affected = 0
+    if db and db.is_initialized:
+        affected = await db.soft_delete_session(user_id, session_id)
+
+    # Redis 清除（可选，也可以保留让其自然过期）
+    await session_mgr.delete_session(user_id, session_id)
+
+    return {
+        "status": "deleted",
+        "user_id": user_id,
+        "session_id": session_id,
+        "affected_messages": affected,
+    }
+
+
+class RenameSessionRequest(BaseModel):
+    """重命名会话请求"""
+    title: str = Field(description="新会话标题", max_length=100)
+
+
+@router.post("/sessions/{user_id}/{session_id}/rename")
+async def rename_session(
+    request: Request,
+    user_id: str,
+    session_id: str,
+    body: RenameSessionRequest,
+):
+    """重命名会话
+
+    标题存储在 sessions 表的 config 字段中。
+    """
+    db = getattr(request.app.state, "database_manager", None)
+    if not db or not db.is_initialized:
+        raise HTTPException(503, "数据库未配置")
+
+    await db.upsert_session_title(user_id, session_id, body.title)
+
+    return {
+        "status": "ok",
+        "user_id": user_id,
+        "session_id": session_id,
+        "title": body.title,
+    }
 
 
 class ForkSessionResponse(BaseModel):

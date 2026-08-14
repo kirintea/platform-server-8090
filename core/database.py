@@ -30,18 +30,7 @@ logger = logging.getLogger(__name__)
 # ============================================================
 
 DDL_STATEMENTS = [
-    # 用户表
-    """
-    CREATE TABLE IF NOT EXISTS users (
-        user_id     VARCHAR(64) PRIMARY KEY,
-        name        VARCHAR(128),
-        preferences JSONB DEFAULT '{}',
-        created_at  TIMESTAMPTZ DEFAULT NOW(),
-        updated_at  TIMESTAMPTZ DEFAULT NOW()
-    )
-    """,
-
-    # 对话历史表（原有）
+    # 对话历史表（核心）
     """
     CREATE TABLE IF NOT EXISTS conversations (
         id          BIGSERIAL PRIMARY KEY,
@@ -50,14 +39,20 @@ DDL_STATEMENTS = [
         role        VARCHAR(16) NOT NULL,
         content     TEXT NOT NULL,
         metadata    JSONB DEFAULT '{}',
+        status      VARCHAR(16) NOT NULL DEFAULT 'active',
         created_at  TIMESTAMPTZ DEFAULT NOW()
     )
     """,
 
-    # 索引：用户+会话查询
+    # 状态字段（软删除：active / deleted）
+    """
+    ALTER TABLE conversations ADD COLUMN IF NOT EXISTS status VARCHAR(16) NOT NULL DEFAULT 'active'
+    """,
+
+    # 索引：用户+会话查询（过滤状态）
     """
     CREATE INDEX IF NOT EXISTS idx_conv_user_session
-    ON conversations(user_id, session_id)
+    ON conversations(user_id, session_id) WHERE status = 'active'
     """,
 
     # 索引：时间范围查询
@@ -66,31 +61,21 @@ DDL_STATEMENTS = [
     ON conversations(created_at)
     """,
 
-    # 索引：用户最近对话
+    # 索引：用户最近对话（过滤状态）
     """
     CREATE INDEX IF NOT EXISTS idx_conv_user_time
-    ON conversations(user_id, created_at DESC)
+    ON conversations(user_id, created_at DESC) WHERE status = 'active'
+    """,
+
+    # 索引：按状态查询（供数据部门清理 deleted 记录）
+    """
+    CREATE INDEX IF NOT EXISTS idx_conv_status
+    ON conversations(status) WHERE status != 'active'
     """,
 
     # ============================================================
     # 服务层新表（Phase 1+）
     # ============================================================
-
-    # Agent 配置表
-    """
-    CREATE TABLE IF NOT EXISTS agents (
-        id          VARCHAR(32) PRIMARY KEY,
-        user_id     VARCHAR(64) NOT NULL,
-        source      VARCHAR(16) NOT NULL DEFAULT 'user',
-        data        JSONB NOT NULL,
-        created_at  TIMESTAMPTZ DEFAULT NOW(),
-        updated_at  TIMESTAMPTZ DEFAULT NOW()
-    )
-    """,
-    """
-    CREATE INDEX IF NOT EXISTS idx_agents_user
-    ON agents(user_id)
-    """,
 
     # Session 会话表
     """
@@ -102,17 +87,30 @@ DDL_STATEMENTS = [
         team_id     VARCHAR(32),
         config      JSONB NOT NULL DEFAULT '{}',
         state_json  TEXT NOT NULL DEFAULT '',
+        status      VARCHAR(16) NOT NULL DEFAULT 'active',
         created_at  TIMESTAMPTZ DEFAULT NOW(),
         updated_at  TIMESTAMPTZ DEFAULT NOW()
     )
     """,
+
+    # 状态字段（软删除：active / deleted）
+    """
+    ALTER TABLE sessions ADD COLUMN IF NOT EXISTS status VARCHAR(16) NOT NULL DEFAULT 'active'
+    """,
+
     """
     CREATE INDEX IF NOT EXISTS idx_sessions_user_agent
-    ON sessions(user_id, agent_id)
+    ON sessions(user_id, agent_id) WHERE status = 'active'
     """,
     """
     CREATE INDEX IF NOT EXISTS idx_sessions_team
-    ON sessions(team_id) WHERE team_id IS NOT NULL
+    ON sessions(team_id) WHERE team_id IS NOT NULL AND status = 'active'
+    """,
+
+    # 索引：按状态查询（供数据部门清理 deleted 记录）
+    """
+    CREATE INDEX IF NOT EXISTS idx_sessions_status
+    ON sessions(status) WHERE status != 'active'
     """,
 
     # MCP 已安装表
@@ -150,24 +148,6 @@ DDL_STATEMENTS = [
     """
     CREATE INDEX IF NOT EXISTS idx_skills_user
     ON skills(user_id)
-    """,
-
-    # 消息持久化表
-    """
-    CREATE TABLE IF NOT EXISTS messages (
-        id          BIGSERIAL PRIMARY KEY,
-        user_id     VARCHAR(64) NOT NULL,
-        session_id  VARCHAR(32) NOT NULL,
-        msg_id      VARCHAR(64) NOT NULL,
-        role        VARCHAR(16) NOT NULL,
-        content     TEXT NOT NULL DEFAULT '',
-        metadata    JSONB DEFAULT '{}',
-        created_at  TIMESTAMPTZ DEFAULT NOW()
-    )
-    """,
-    """
-    CREATE INDEX IF NOT EXISTS idx_messages_session
-    ON messages(user_id, session_id, id)
     """,
 
     # 定时任务表
@@ -400,64 +380,209 @@ class DatabaseManager:
         self,
         user_id: str,
         session_id: str,
-        limit: int = 100,
-    ) -> list[asyncpg.Record]:
-        """获取对话历史
+        before_id: int | None = None,
+        limit: int = 50,
+    ) -> dict:
+        """获取对话历史（游标分页，正序）
 
         Args:
             user_id: 用户 ID
             session_id: 会话 ID
+            before_id: 游标，获取此 ID 之前的消息（用于加载更多）
             limit: 返回记录数上限
 
         Returns:
-            对话记录列表（按时间正序）
+            {
+                "messages": [...],
+                "has_more": bool,
+                "oldest_id": int | None
+            }
         """
-        sql = """
-            SELECT id, role, content, metadata, created_at
-            FROM conversations
-            WHERE user_id = $1 AND session_id = $2
-            ORDER BY created_at DESC
-            LIMIT $3
-        """
-        rows = await self.fetch(sql, user_id, session_id, limit)
-        return list(reversed(rows))
+        if before_id:
+            sql = """
+                SELECT id, role, content, created_at
+                FROM conversations
+                WHERE user_id = $1 AND session_id = $2 AND status = 'active' AND id < $3
+                ORDER BY id DESC
+                LIMIT $4
+            """
+            rows = await self.fetch(sql, user_id, session_id, before_id, limit)
+        else:
+            sql = """
+                SELECT id, role, content, created_at
+                FROM conversations
+                WHERE user_id = $1 AND session_id = $2 AND status = 'active'
+                ORDER BY id DESC
+                LIMIT $3
+            """
+            rows = await self.fetch(sql, user_id, session_id, limit)
 
-    async def get_user_info(self, user_id: str) -> asyncpg.Record | None:
-        """获取用户信息
+        # 转为正序
+        messages = list(reversed(rows))
 
-        Args:
-            user_id: 用户 ID
+        # 判断是否还有更多
+        has_more = len(rows) == limit
+        oldest_id = messages[0]["id"] if messages else None
 
-        Returns:
-            用户记录或 None
-        """
-        sql = "SELECT * FROM users WHERE user_id = $1"
-        return await self.fetchrow(sql, user_id)
+        return {
+            "messages": [
+                {
+                    "id": row["id"],
+                    "role": row["role"],
+                    "content": row["content"],
+                    "created_at": row["created_at"].isoformat() if row["created_at"] else None,
+                }
+                for row in messages
+            ],
+            "has_more": has_more,
+            "oldest_id": oldest_id,
+        }
 
-    async def upsert_user(
+    async def get_user_sessions(
         self,
         user_id: str,
-        name: str | None = None,
-        preferences: dict | None = None,
-    ) -> None:
-        """创建或更新用户
+        limit: int = 50,
+    ) -> list[dict]:
+        """获取用户的会话列表（从 conversations 聚合 + sessions 获取自定义标题）
 
         Args:
             user_id: 用户 ID
-            name: 用户名称
-            preferences: 偏好设置
+            limit: 返回会话数上限
+
+        Returns:
+            会话列表（按最后活跃时间倒序）
+        """
+        # 从 conversations 聚合会话信息，同时 left join sessions 获取自定义标题
+        sql = """
+            SELECT
+                c.session_id,
+                MIN(c.created_at) AS created_at,
+                MAX(c.created_at) AS last_active,
+                COUNT(*) AS message_count,
+                s.config->>'title' AS custom_title,
+                (
+                    SELECT LEFT(content, 30)
+                    FROM conversations
+                    WHERE user_id = c.user_id
+                      AND session_id = c.session_id
+                      AND role = 'user'
+                      AND status = 'active'
+                    ORDER BY id ASC
+                    LIMIT 1
+                ) AS first_message
+            FROM conversations c
+            LEFT JOIN sessions s ON s.id = c.session_id AND s.user_id = c.user_id AND s.status = 'active'
+            WHERE c.user_id = $1 AND c.status = 'active'
+            GROUP BY c.session_id, s.config
+            ORDER BY last_active DESC
+            LIMIT $2
+        """
+        rows = await self.fetch(sql, user_id, limit)
+
+        # 转换为字典列表，优先使用自定义标题
+        sessions = []
+        for row in rows:
+            title = row["custom_title"] or row["first_message"] or "新会话"
+            sessions.append({
+                "session_id": row["session_id"],
+                "title": title,
+                "created_at": row["created_at"].isoformat() if row["created_at"] else None,
+                "last_active": row["last_active"].isoformat() if row["last_active"] else None,
+                "message_count": row["message_count"],
+            })
+
+        return sessions
+
+    async def soft_delete_session(
+        self,
+        user_id: str,
+        session_id: str,
+    ) -> int:
+        """软删除会话（将所有消息标记为 deleted）
+
+        Args:
+            user_id: 用户 ID
+            session_id: 会话 ID
+
+        Returns:
+            受影响的行数
+        """
+        sql = """
+            UPDATE conversations
+            SET status = 'deleted'
+            WHERE user_id = $1 AND session_id = $2 AND status = 'active'
+        """
+        result = await self.execute(sql, user_id, session_id)
+        # 解析 "UPDATE N" 获取受影响行数
+        return int(result.split()[-1]) if result else 0
+
+    async def soft_delete_conversation(
+        self,
+        conversation_id: int,
+    ) -> bool:
+        """软删除单条对话记录
+
+        Args:
+            conversation_id: 对话记录 ID
+
+        Returns:
+            是否成功
+        """
+        sql = """
+            UPDATE conversations
+            SET status = 'deleted'
+            WHERE id = $1 AND status = 'active'
+        """
+        result = await self.execute(sql, conversation_id)
+        return "UPDATE 1" in result
+
+    async def upsert_session_title(
+        self,
+        user_id: str,
+        session_id: str,
+        title: str,
+    ) -> None:
+        """更新或插入会话标题（存储在 sessions 表 config 字段）
+
+        Args:
+            user_id: 用户 ID
+            session_id: 会话 ID
+            title: 会话标题
         """
         import json
 
         sql = """
-            INSERT INTO users (user_id, name, preferences, updated_at)
-            VALUES ($1, $2, $3, NOW())
-            ON CONFLICT (user_id) DO UPDATE SET
-                name = COALESCE(EXCLUDED.name, users.name),
-                preferences = COALESCE(EXCLUDED.preferences, users.preferences),
+            INSERT INTO sessions (id, user_id, agent_id, config, status)
+            VALUES ($1, $2, 'default', $3, 'active')
+            ON CONFLICT (id) DO UPDATE SET
+                config = sessions.config || EXCLUDED.config,
                 updated_at = NOW()
         """
-        await self.execute(sql, user_id, name, json.dumps(preferences or {}))
+        await self.execute(sql, session_id, user_id, json.dumps({"title": title}))
+
+    async def get_session_title(
+        self,
+        user_id: str,
+        session_id: str,
+    ) -> str | None:
+        """获取会话标题
+
+        Args:
+            user_id: 用户 ID
+            session_id: 会话 ID
+
+        Returns:
+            会话标题或 None
+        """
+        import json
+
+        sql = """
+            SELECT config->>'title' AS title
+            FROM sessions
+            WHERE id = $1 AND user_id = $2 AND status = 'active'
+        """
+        row = await self.fetchrow(sql, session_id, user_id)
+        return row["title"] if row else None
 
     @property
     def is_initialized(self) -> bool:

@@ -324,7 +324,7 @@ database:
   pool_size: 10
 ```
 
-`DatabaseManager` 在 `main.py` lifespan 中初始化，启动时自动执行幂等 DDL（建表 + 索引），未配置 URL 时跳过。提供 `execute / fetch / fetchrow / fetchval` 通用查询接口，以及 `insert_conversation / get_conversation_history / upsert_user / get_user_info` 便捷方法。
+`DatabaseManager` 在 `main.py` lifespan 中初始化，启动时自动执行幂等 DDL（建表 + 索引），未配置 URL 时跳过。提供 `execute / fetch / fetchrow / fetchval` 通用查询接口，以及 `insert_conversation / get_conversation_history` 便捷方法。
 
 ### AgentState 序列化
 
