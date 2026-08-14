@@ -79,16 +79,16 @@ _TZ_SHANGHAI = zoneinfo.ZoneInfo("Asia/Shanghai")
 
 
 def _beijing_rotation(message, file):
-    """北京时间 00:00 或文件 >50MB 时轮转"""
-    # 文件大小轮转
+    """北京时间 00:00 或文件 >50MB 时轮转
+
+    返回 datetime 对象：loguru 在当前时间超过该时刻时触发轮转。
+    """
     if file.tell() > 50 * 1024 * 1024:
         return True
-    # 时间轮转：返回 timedelta，loguru 按时间间隔处理
     now = datetime.now(_TZ_SHANGHAI)
-    tomorrow = (now + timedelta(days=1)).replace(
+    return (now + timedelta(days=1)).replace(
         hour=0, minute=0, second=0, microsecond=0,
     )
-    return tomorrow - now
 
 
 def setup_logging(log_dir: str, log_level: str, backup_count: int) -> None:
