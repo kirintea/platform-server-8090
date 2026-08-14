@@ -23,10 +23,13 @@
 from __future__ import annotations
 
 import logging
+import logging.handlers
 import os
+import sys
 import threading
 import webbrowser
 from contextlib import asynccontextmanager
+from datetime import datetime, timedelta
 
 import uvicorn
 from dotenv import load_dotenv
@@ -56,10 +59,110 @@ from core.workspace import LocalWorkspaceManager
 
 logger = logging.getLogger(__name__)
 
+
+# ============================================================
+# 0. 日志配置
+# ============================================================
+
+class BeijingTimedRotatingFileHandler(logging.handlers.TimedRotatingFileHandler):
+    """按北京时间 00:00 轮转日志，同时支持文件大小限制（>50MB 立即轮转）"""
+
+    _TZ = None
+
+    @classmethod
+    def _get_tz(cls):
+        if cls._TZ is None:
+            try:
+                import zoneinfo
+                cls._TZ = zoneinfo.ZoneInfo("Asia/Shanghai")
+            except ImportError:
+                # Python < 3.9 fallback（不会走到，3.12 必有）
+                cls._TZ = None
+        return cls._TZ
+
+    def computeRollover(self, currentTime):
+        """计算下一次轮转时间：北京时间次日 00:00"""
+        tz = self._get_tz()
+        if tz:
+            now = datetime.fromtimestamp(currentTime, tz=tz)
+            tomorrow = (now + timedelta(days=1)).replace(
+                hour=0, minute=0, second=0, microsecond=0,
+            )
+            return int(tomorrow.timestamp())
+        # fallback: 使用父类逻辑（本地时间 midnight）
+        return super().computeRollover(currentTime)
+
+    def shouldRollover(self, record):
+        """日期轮转 或 文件 >50MB 时轮转"""
+        if super().shouldRollover(record):
+            return True
+        try:
+            if self.stream and self.stream.tell() > 50 * 1024 * 1024:
+                return True
+        except Exception:
+            pass
+        return False
+
+
+def setup_logging(log_dir: str, log_level: str, backup_count: int) -> None:
+    """配置 root logger：控制台 + 文件双输出
+
+    Args:
+        log_dir: 日志文件目录
+        log_level: 日志级别
+        backup_count: 日志保留天数
+    """
+    # 创建日志目录
+    os.makedirs(log_dir, exist_ok=True)
+    log_file = os.path.join(log_dir, "platform-server.log")
+
+    # 日志格式
+    fmt = "%(asctime)s | %(levelname)-7s | %(process)d | %(name)s | %(message)s"
+    datefmt = "%Y-%m-%d %H:%M:%S"
+    formatter = logging.Formatter(fmt, datefmt=datefmt)
+
+    # Root logger
+    root = logging.getLogger()
+    root.setLevel(getattr(logging, log_level.upper(), logging.INFO))
+
+    # 清除已有 handler（避免重复添加）
+    root.handlers.clear()
+
+    # 1. 控制台 handler → stderr
+    console = logging.StreamHandler(sys.stderr)
+    console.setFormatter(formatter)
+    root.addHandler(console)
+
+    # 2. 文件 handler → logs/platform-server.log（北京时间 00:00 轮转）
+    file_handler = BeijingTimedRotatingFileHandler(
+        filename=log_file,
+        when="midnight",
+        interval=1,
+        backupCount=backup_count,
+        encoding="utf-8",
+        delay=True,  # 延迟创建文件（多 worker 安全）
+    )
+    file_handler.suffix = "%Y-%m-%d"
+    file_handler.setFormatter(formatter)
+    root.addHandler(file_handler)
+
+    logging.getLogger(__name__).info(
+        "日志已配置: file=%s, level=%s, backup=%d",
+        log_file, log_level, backup_count,
+    )
+
+
 # ============================================================
 # 1. 加载配置
 # ============================================================
 config = ConfigManager.get_instance().load()
+
+# 初始化日志（必须在其他模块 logger 输出之前）
+setup_logging(
+    log_dir=config.server.log_dir,
+    log_level=config.server.log_level,
+    backup_count=config.server.log_backup_count,
+)
 
 # ============================================================
 # 2. 初始化 OTel 追踪 (必须在 Agent 创建之前)
@@ -178,8 +281,27 @@ app.mount("/static", StaticFiles(directory=_static_dir), name="static")
 # 5. 启动入口
 # ============================================================
 if __name__ == "__main__":
-    uvicorn.run(
-        app,
-        host=config.server.host,
-        port=config.server.port,
-    )
+    workers = config.server.workers
+    if workers == 0:
+        workers = os.cpu_count() or 1
+
+    log_level = config.server.log_level.lower()
+
+    if workers > 1:
+        # 多 worker 必须用 import string（uvicorn 子进程会重新 import 模块）
+        logger.info("启动模式: 多 Worker (%d workers)", workers)
+        uvicorn.run(
+            "main:app",
+            host=config.server.host,
+            port=config.server.port,
+            workers=workers,
+            log_level=log_level,
+        )
+    else:
+        # 单 worker: 传 app 对象，开发模式
+        uvicorn.run(
+            app,
+            host=config.server.host,
+            port=config.server.port,
+            log_level=log_level,
+        )

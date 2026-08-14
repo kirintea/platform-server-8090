@@ -35,6 +35,10 @@ class ServerConfig(BaseModel):
     """HTTP 服务配置"""
     host: str = Field(default="0.0.0.0", description="监听地址")
     port: int = Field(default=8090, description="监听端口")
+    workers: int = Field(default=1, description="Worker 进程数 (1=single, 0=auto CPU)")
+    log_level: str = Field(default="INFO", description="日志级别 (DEBUG/INFO/WARNING/ERROR)")
+    log_dir: str = Field(default="logs", description="日志文件目录（相对项目根）")
+    log_backup_count: int = Field(default=30, description="日志保留天数")
 
 
 class ToolGuardConfig(BaseModel):

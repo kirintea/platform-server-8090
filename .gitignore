@@ -14,6 +14,9 @@ wheels/
 # 运行时数据（Agent 工作区沙箱）
 workspaces/
 
+# 日志文件
+logs/
+
 # 临时调试与补丁文件（含凭证，禁止提交）
 _tmp_*
 

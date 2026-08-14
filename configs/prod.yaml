@@ -23,6 +23,10 @@ llm:
 server:
   host: "0.0.0.0"
   port: 9090
+  workers: 0
+  log_level: "INFO"
+  log_dir: "logs"
+  log_backup_count: 30
 
 agent:
   name: "platform_agent"
