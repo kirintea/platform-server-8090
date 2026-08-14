@@ -136,19 +136,34 @@ body {
   color: var(--text-dim);
   margin-top: 2px;
 }
-.session-item .btn-delete {
+.session-item .session-actions {
   display: none;
-  background: none;
-  border: none;
-  color: var(--danger);
-  cursor: pointer;
-  font-size: 16px;
-  padding: 2px 4px;
-  border-radius: 4px;
+  gap: 4px;
   flex-shrink: 0;
 }
-.session-item:hover .btn-delete { display: flex; }
-.session-item .btn-delete:hover { background: rgba(229, 57, 53, 0.15); }
+.session-item:hover .session-actions { display: flex; }
+.session-item .btn-rename,
+.session-item .btn-delete {
+  background: none;
+  border: none;
+  cursor: pointer;
+  font-size: 14px;
+  padding: 2px 4px;
+  border-radius: 4px;
+}
+.session-item .btn-rename {
+  color: var(--text-dim);
+}
+.session-item .btn-rename:hover {
+  background: var(--surface3);
+  color: var(--text);
+}
+.session-item .btn-delete {
+  color: var(--danger);
+}
+.session-item .btn-delete:hover {
+  background: rgba(229, 57, 53, 0.15);
+}
 
 .session-list-empty {
   text-align: center;
@@ -372,6 +387,50 @@ body {
   color: #fff;
 }
 .btn-confirm-delete:hover { background: var(--danger-hover); }
+
+.btn-confirm {
+  background: var(--accent);
+  color: #fff;
+}
+.btn-confirm:hover { background: var(--accent-light); }
+
+.rename-input {
+  width: 100%;
+  padding: 10px 12px;
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--text);
+  font-size: 14px;
+  outline: none;
+  margin-bottom: 16px;
+}
+.rename-input:focus { border-color: var(--accent); }
+
+/* ---- Load More Button ---- */
+.load-more-btn {
+  text-align: center;
+  padding: 8px 0;
+}
+.load-more-btn button {
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+  padding: 6px 16px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 12px;
+  transition: all 0.15s;
+}
+.load-more-btn button:hover {
+  background: var(--surface3);
+  color: var(--text);
+  border-color: var(--accent);
+}
+.load-more-btn button:disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
 
 /* ---- Thinking Block ---- */
 .thinking-block {

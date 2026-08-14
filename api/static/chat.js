@@ -15,6 +15,8 @@ const sidebarEl = document.getElementById('sidebar');
 let currentSessionId = '';
 let isStreaming = false;
 let currentAbortController = null;
+let hasMoreMessages = false;
+let oldestMessageId = null;
 
 // ============ Sidebar ============
 
@@ -39,22 +41,26 @@ function renderSessionList(sessions) {
     return;
   }
 
+  const userId = userIdEl.value.trim() || 'anonymous';
+
   sessionListEl.innerHTML = sessions.map(s => {
     const isActive = s.session_id === currentSessionId;
     const title = escapeHtml(s.title || '新会话');
     const time = formatTime(s.last_active);
     const msgCount = s.message_count || 0;
-    const shortId = s.session_id.slice(0, 8);
     return `
       <div class="session-item ${isActive ? 'active' : ''}"
-           onclick="switchSession('${s.user_id}', '${s.session_id}')"
+           onclick="switchSession('${userId}', '${s.session_id}')"
            title="${escapeHtml(s.session_id)}">
         <span class="session-icon">💬</span>
         <div class="session-info">
           <div class="session-title">${title}</div>
           <div class="session-meta">${time} · ${msgCount} 条消息</div>
         </div>
-        <button class="btn-delete" onclick="event.stopPropagation(); confirmDelete('${s.user_id}', '${s.session_id}', '${title}')" title="删除会话">✕</button>
+        <div class="session-actions">
+          <button class="btn-rename" onclick="event.stopPropagation(); renameSession('${userId}', '${s.session_id}', '${title}')" title="重命名">✏️</button>
+          <button class="btn-delete" onclick="event.stopPropagation(); confirmDelete('${userId}', '${s.session_id}', '${title}')" title="删除会话">✕</button>
+        </div>
       </div>
     `;
   }).join('');
@@ -68,15 +74,14 @@ async function switchSession(userId, sessionId) {
   sessionInfoEl.textContent = `会话: ${sessionId.slice(0, 8)}...`;
   messagesEl.innerHTML = '';
 
+  // 重置分页状态
+  hasMoreMessages = false;
+  oldestMessageId = null;
+
   // 加载消息历史
   try {
-    const resp = await fetch(`/sessions/${encodeURIComponent(userId)}/${encodeURIComponent(sessionId)}/messages`);
+    const resp = await fetch(`/sessions/${encodeURIComponent(userId)}/${encodeURIComponent(sessionId)}/messages?limit=50`);
     const data = await resp.json();
-
-    if (data.error) {
-      addMessage('error', `加载失败: ${data.error}`);
-      return;
-    }
 
     const messages = data.messages || [];
     if (messages.length === 0) {
@@ -87,6 +92,15 @@ async function switchSession(userId, sessionId) {
         addMessage(role, msg.content);
       }
     }
+
+    // 更新分页状态
+    hasMoreMessages = data.has_more || false;
+    oldestMessageId = data.oldest_id || null;
+
+    // 如果有更多消息，添加加载更多按钮
+    if (hasMoreMessages) {
+      addLoadMoreButton(userId, sessionId);
+    }
   } catch (err) {
     addMessage('error', `加载会话失败: ${err.message}`);
   }
@@ -94,6 +108,60 @@ async function switchSession(userId, sessionId) {
   // 更新侧边栏高亮
   updateSessionListHighlight();
   inputEl.focus();
+}
+
+function addLoadMoreButton(userId, sessionId) {
+  // 移除已有的加载更多按钮
+  const existing = messagesEl.querySelector('.load-more-btn');
+  if (existing) existing.remove();
+
+  const btn = document.createElement('div');
+  btn.className = 'load-more-btn';
+  btn.innerHTML = '<button onclick="loadMoreMessages(\'' + userId + '\', \'' + sessionId + '\', this)">加载更多历史消息</button>';
+  messagesEl.insertBefore(btn, messagesEl.firstChild);
+}
+
+async function loadMoreMessages(userId, sessionId, btn) {
+  if (!hasMoreMessages || !oldestMessageId) return;
+
+  btn.textContent = '加载中...';
+  btn.disabled = true;
+
+  try {
+    const resp = await fetch(`/sessions/${encodeURIComponent(userId)}/${encodeURIComponent(sessionId)}/messages?before_id=${oldestMessageId}&limit=50`);
+    const data = await resp.json();
+
+    const messages = data.messages || [];
+    if (messages.length > 0) {
+      // 在现有消息前插入
+      const fragment = document.createDocumentFragment();
+      for (const msg of messages) {
+        const role = msg.role === 'user' ? 'user' : 'agent';
+        const div = document.createElement('div');
+        div.className = `msg ${role}`;
+        div.textContent = msg.content;
+        fragment.appendChild(div);
+      }
+
+      // 移除加载更多按钮
+      btn.parentElement.remove();
+
+      // 插入新消息
+      messagesEl.insertBefore(fragment, messagesEl.firstChild);
+
+      // 更新分页状态
+      hasMoreMessages = data.has_more || false;
+      oldestMessageId = data.oldest_id || null;
+
+      // 如果还有更多，重新添加按钮
+      if (hasMoreMessages) {
+        addLoadMoreButton(userId, sessionId);
+      }
+    }
+  } catch (err) {
+    btn.textContent = '加载失败，点击重试';
+    btn.disabled = false;
+  }
 }
 
 function updateSessionListHighlight() {
@@ -126,11 +194,63 @@ function confirmDelete(userId, sessionId, title) {
   document.body.appendChild(overlay);
 }
 
+function renameSession(userId, sessionId, currentTitle) {
+  const overlay = document.createElement('div');
+  overlay.className = 'confirm-overlay';
+  overlay.innerHTML = `
+    <div class="confirm-dialog">
+      <p>重命名会话</p>
+      <input type="text" class="rename-input" value="${escapeHtml(currentTitle)}" maxlength="100" placeholder="输入新标题">
+      <div class="btn-group">
+        <button class="btn-cancel" onclick="this.closest('.confirm-overlay').remove()">取消</button>
+        <button class="btn-confirm" onclick="doRename('${userId}', '${sessionId}', this)">确定</button>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(overlay);
+
+  // 聚焦输入框并选中文本
+  const input = overlay.querySelector('.rename-input');
+  input.focus();
+  input.select();
+
+  // 回车确认
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      doRename(userId, sessionId, overlay.querySelector('.btn-confirm'));
+    }
+  });
+}
+
+async function doRename(userId, sessionId, btn) {
+  const overlay = btn.closest('.confirm-overlay');
+  const input = overlay.querySelector('.rename-input');
+  const newTitle = input.value.trim();
+
+  if (!newTitle) {
+    input.focus();
+    return;
+  }
+
+  try {
+    await fetch(`/sessions/${encodeURIComponent(userId)}/${encodeURIComponent(sessionId)}/rename`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ title: newTitle }),
+    });
+    overlay.remove();
+    await loadSessionList();
+  } catch (err) {
+    overlay.remove();
+    addMessage('error', `重命名失败: ${err.message}`);
+  }
+}
+
 async function doDelete(userId, sessionId, btn) {
   const overlay = btn.closest('.confirm-overlay');
   try {
-    await fetch(`/sessions/${encodeURIComponent(userId)}/${encodeURIComponent(sessionId)}`, {
-      method: 'DELETE',
+    await fetch(`/sessions/${encodeURIComponent(userId)}/${encodeURIComponent(sessionId)}/delete`, {
+      method: 'POST',
     });
     overlay.remove();
 
@@ -153,7 +273,15 @@ async function doDelete(userId, sessionId, btn) {
 
 function formatTime(timestamp) {
   if (!timestamp) return '';
-  const date = new Date(timestamp * 1000);
+
+  // 支持 ISO 8601 格式和 timestamp
+  let date;
+  if (typeof timestamp === 'string' && timestamp.includes('T')) {
+    date = new Date(timestamp);
+  } else {
+    date = new Date(timestamp * 1000);
+  }
+
   const now = new Date();
   const isToday = date.toDateString() === now.toDateString();
 
