@@ -51,6 +51,12 @@ async def _persist_conversation(
         if db and db.is_initialized:
             await db.insert_conversation(user_id, session_id, "user", user_message)
             await db.insert_conversation(user_id, session_id, "assistant", assistant_reply)
+            # 自动创建/更新 sessions 记录（标题取首条用户消息前30字）
+            title = user_message[:30] if user_message else None
+            if title:
+                existing = await db.get_session_title(user_id, session_id)
+                if not existing:
+                    await db.upsert_session_title(user_id, session_id, title)
     except Exception:
         logger.exception("后台持久化失败")
 

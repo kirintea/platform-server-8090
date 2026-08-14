@@ -38,7 +38,7 @@ DDL_STATEMENTS = [
         session_id  VARCHAR(64) NOT NULL,
         role        VARCHAR(16) NOT NULL,
         content     TEXT NOT NULL,
-        metadata    JSONB DEFAULT '{}',
+        metadata    JSONB DEFAULT NULL,
         status      VARCHAR(16) NOT NULL DEFAULT 'active',
         created_at  TIMESTAMPTZ DEFAULT NOW()
     )
@@ -47,6 +47,11 @@ DDL_STATEMENTS = [
     # 状态字段（软删除：active / deleted）
     """
     ALTER TABLE conversations ADD COLUMN IF NOT EXISTS status VARCHAR(16) NOT NULL DEFAULT 'active'
+    """,
+
+    # metadata 默认值改为 NULL（已有表）
+    """
+    ALTER TABLE conversations ALTER COLUMN metadata SET DEFAULT NULL
     """,
 
     # 索引：用户+会话查询（过滤状态）
@@ -107,7 +112,7 @@ DDL_STATEMENTS = [
     ON sessions(team_id) WHERE team_id IS NOT NULL AND status = 'active'
     """,
 
-    # 索引：按状态查询（供数据部门清理 deleted 记录）
+    # 索引：按状态查询（供数据清理 deleted 记录）
     """
     CREATE INDEX IF NOT EXISTS idx_sessions_status
     ON sessions(status) WHERE status != 'active'
@@ -373,7 +378,7 @@ class DatabaseManager:
             session_id,
             role,
             content,
-            json.dumps(metadata or {}),
+            json.dumps(metadata) if metadata is not None else None,
         )
 
     async def get_conversation_history(
@@ -461,13 +466,13 @@ class DatabaseManager:
                 COUNT(*) AS message_count,
                 s.config->>'title' AS custom_title,
                 (
-                    SELECT LEFT(content, 30)
-                    FROM conversations
-                    WHERE user_id = c.user_id
-                      AND session_id = c.session_id
-                      AND role = 'user'
-                      AND status = 'active'
-                    ORDER BY id ASC
+                    SELECT LEFT(x.content, 30)
+                    FROM conversations x
+                    WHERE x.user_id = $1
+                      AND x.session_id = c.session_id
+                      AND x.role = 'user'
+                      AND x.status = 'active'
+                    ORDER BY x.id ASC
                     LIMIT 1
                 ) AS first_message
             FROM conversations c
