@@ -90,6 +90,18 @@ class AgentConfig(BaseModel):
     context_trigger_ratio: float = Field(default=0.8, description="上下文压缩触发比例")
     context_reserve_ratio: float = Field(default=0.1, description="压缩后保留比例")
     permission_mode: str = Field(default="bypass", description="权限模式: auto / bypass")
+    sandbox_dir: str = Field(
+        default="workspaces",
+        description="Agent 沙箱根目录（相对项目根或绝对路径），所有工具操作限制在此目录内",
+    )
+    sandbox_skills: bool = Field(
+        default=False,
+        description="true 时 skills 从 sandbox_dir 下加载（skills/ 子目录）",
+    )
+    sandbox_mcp: bool = Field(
+        default=False,
+        description="true 时 MCP 配置从 sandbox_dir 下加载（mcp/ 子目录）",
+    )
     tool_guard: ToolGuardConfig = Field(default_factory=ToolGuardConfig, description="工具守卫配置")
     command_guard: CommandGuardConfig = Field(default_factory=CommandGuardConfig, description="命令内容守卫配置")
     tool_manager: ToolManagerConfig = Field(default_factory=ToolManagerConfig, description="工具管理器配置")

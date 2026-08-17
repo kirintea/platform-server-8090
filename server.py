@@ -86,10 +86,11 @@ def create_app(config) -> FastAPI:
         app.state.session_manager = session_mgr
         logger.info("会话管理器已就绪 (Redis: {})", config.redis.url)
 
-        # 创建工作区管理器
-        workspace_mgr = LocalWorkspaceManager(base_dir="./workspaces")
+        # 创建工作区管理器（沙箱根目录，启动时自动创建）
+        sandbox_dir = os.path.abspath(config.agent.sandbox_dir)
+        workspace_mgr = LocalWorkspaceManager(base_dir=sandbox_dir)
         app.state.workspace_manager = workspace_mgr
-        logger.info("工作区管理器已就绪")
+        logger.info("工作区管理器已就绪 (沙箱目录: {})", sandbox_dir)
 
         # 创建 Chat 服务（Fire-and-Forget 模式）
         chat_service = ChatService(session_mgr, message_bus)

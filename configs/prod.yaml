@@ -58,6 +58,9 @@ agent:
   context_trigger_ratio: 0.8
   context_reserve_ratio: 0.1
   permission_mode: "auto"
+  sandbox_dir: "workspaces"
+  sandbox_skills: false      # true 时 skills 从 sandbox_dir/skills/ 加载
+  sandbox_mcp: false         # true 时 MCP 配置从 sandbox_dir/mcp/ 加载
   tool_guard:
     enabled: true
     mode: "blocklist"

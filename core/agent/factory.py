@@ -26,6 +26,7 @@ from core.formatter import SiliconFlowFormatter
 from middleware.tool_guard import ToolGuardMiddleware
 from middleware.command_guard import CommandGuardMiddleware
 from middleware.tool_manager import ToolManagerMiddleware
+from middleware.path_guard import PathGuardMiddleware
 
 
 class AgentFactory:
@@ -130,17 +131,27 @@ class AgentFactory:
     @staticmethod
     def _create_toolkit(config: AppConfig) -> Toolkit:
         """组装 Toolkit：配置驱动的工具 + MCP + Skills"""
+        import os
+
         # 从配置文件加载工具（替代硬编码列表）
         tool_manager = ToolManagerMiddleware(config.agent.tool_manager.config_path)
         tools = tool_manager.load_tools()
 
         # MCP 客户端
+        sandbox_dir = os.path.abspath(config.agent.sandbox_dir)
+        if config.agent.sandbox_mcp:
+            # MCP 配置从 sandbox_dir/mcp/ 加载（预留，当前 MCP 配置仍在 yaml 中）
+            pass
         mcp_clients = AgentFactory._create_mcp_clients(config.mcp_servers)
 
         # Skills 加载器
         skill_loaders = []
+        if config.agent.sandbox_skills:
+            skills_dir = os.path.join(sandbox_dir, "skills")
+        else:
+            skills_dir = "./skills"
         try:
-            loader = LocalSkillLoader(directory="./skills", scan_subdir=True)
+            loader = LocalSkillLoader(directory=skills_dir, scan_subdir=True)
             skill_loaders.append(loader)
         except Exception:
             pass  # skills 目录不存在时忽略
@@ -190,5 +201,10 @@ class AgentFactory:
                 mode=config.agent.command_guard.mode,
                 rules=config.agent.command_guard.rules,
             ))
+
+        # 沙箱路径守卫中间件（路径级）— 始终启用
+        import os
+        sandbox_dir = os.path.abspath(config.agent.sandbox_dir)
+        middlewares.append(PathGuardMiddleware(sandbox_dir=sandbox_dir))
 
         return middlewares

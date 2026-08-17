@@ -57,6 +57,9 @@ agent:
   context_trigger_ratio: 0.8
   context_reserve_ratio: 0.1
   permission_mode: "bypass"
+  sandbox_dir: "workspaces"
+  sandbox_skills: false      # true 时 skills 从 sandbox_dir/skills/ 加载
+  sandbox_mcp: false         # true 时 MCP 配置从 sandbox_dir/mcp/ 加载
   tool_guard:
     enabled: false
     mode: "allowlist" # allowlist | blocklist
@@ -92,6 +95,6 @@ database:
   pool_size: 10
 
 redis:
-  url: "${REDIS_URL:-redis://localhost:6379/0}"
+  url: "${REDIS_URL:-redis://localhost:6390/0}"
   key_prefix: "agentscope:session:"
   session_ttl: 1800

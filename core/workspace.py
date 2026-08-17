@@ -33,15 +33,24 @@ class Workspace:
     """所属会话 ID"""
 
     def resolve_path(self, relative_path: str) -> str:
-        """将相对路径解析为绝对路径
+        """将相对路径解析为绝对路径，确保不越界沙箱
 
         Args:
             relative_path: 相对于工作区根目录的路径
 
         Returns:
             绝对路径
+
+        Raises:
+            ValueError: 路径越界（超出工作区根目录）
         """
-        return os.path.join(self.workdir, relative_path)
+        target = os.path.normpath(os.path.join(self.workdir, relative_path))
+        workdir_norm = os.path.normpath(self.workdir)
+        if not (target == workdir_norm or target.startswith(workdir_norm + os.sep)):
+            raise ValueError(
+                f"路径越界: '{relative_path}' 超出工作区范围 ({self.workdir})"
+            )
+        return target
 
     def list_files(self, sub_path: str = ".") -> list[dict]:
         """列出工作区中的文件
