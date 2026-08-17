@@ -76,8 +76,10 @@ APP_ENV=dev python main.py
 
 ## 服务架构
 
-### main.py (端口 8090) — 自有平台层
+### main.py + server.py (端口 8090) — 自有平台层
 
+- `main.py` — 启动入口：配置加载、日志初始化、OTel 初始化、uvicorn 启动
+- `server.py` — FastAPI 应用：`create_app(config)` 工厂函数、lifespan 资源管理、路由注册
 - 自有 SessionManager、DatabaseManager、RedisMessageBus
 - 面向 `api/static/index.html` 旧版前端
 - 会话存储：Redis `agentscope:session:*` 前缀
@@ -85,19 +87,93 @@ APP_ENV=dev python main.py
 
 ## API 端点（8090）
 
+### 对话（chat）
+
 | 方法 | 路径 | 说明 |
 |------|------|------|
 | POST | `/chat` | 非流式对话 |
 | POST | `/chat/stream` | 流式对话（SSE） |
 | POST | `/chat/` | Fire-and-Forget 触发（事件驱动） |
-| GET | `/sessions/{session_id}/stream` | SSE 事件流订阅 |
 | GET | `/health` | 健康检查 |
+
+### 会话（session）
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
 | GET | `/sessions` | 列出内存中活跃会话（可选 `user_id` 过滤） |
-| GET | `/sessions/{user_id}` | 列出用户所有历史会话（Redis 扫描 `:meta`） |
-| GET | `/sessions/{user_id}/{session_id}/messages` | 获取会话消息历史 |
+| GET | `/sessions/{user_id}` | 列出用户所有历史会话（PG 查询） |
+| GET | `/sessions/{user_id}/{session_id}/messages` | 获取会话消息历史（游标分页） |
 | POST | `/sessions/{user_id}/{session_id}/fork` | 基于父会话创建分支 |
-| DELETE | `/sessions/{user_id}/{session_id}` | 彻底删除会话（内存 + Redis） |
-| GET | `/docs` | Swagger API 文档 |
+| POST | `/sessions/{user_id}/{session_id}/delete` | 软删除会话 |
+| POST | `/sessions/{user_id}/{session_id}/rename` | 重命名会话 |
+| GET | `/sessions/{session_id}/stream` | SSE 事件流订阅 |
+
+### Agent CRUD
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| GET | `/agent` | 列出所有 Agent |
+| POST | `/agent` | 创建 Agent |
+| GET | `/agent/{agent_id}` | 获取单个 Agent |
+| PATCH | `/agent/{agent_id}` | 更新 Agent |
+| DELETE | `/agent/{agent_id}` | 删除 Agent |
+
+### MCP CRUD
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| GET | `/mcp` | 列出已安装 MCP |
+| POST | `/mcp` | 添加 MCP |
+| PATCH | `/mcp/{mcp_id}` | 更新 MCP |
+| DELETE | `/mcp/{mcp_id}` | 删除 MCP |
+
+### Skill CRUD
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| GET | `/skill` | 列出已安装 Skill |
+| POST | `/skill` | 添加 Skill |
+| GET | `/skill/{skill_id}` | 获取单个 Skill |
+| DELETE | `/skill/{skill_id}` | 删除 Skill |
+
+### 定时任务（schedule）
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| GET | `/schedule` | 列出定时任务 |
+| POST | `/schedule` | 创建定时任务 |
+| PATCH | `/schedule/{schedule_id}` | 更新定时任务 |
+| DELETE | `/schedule/{schedule_id}` | 删除定时任务 |
+
+### 工作区（workspace）
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| GET | `/workspace/{user_id}/{session_id}/files` | 列出工作区文件 |
+| GET | `/workspace/{user_id}/{session_id}/files/{path}` | 下载工作区文件 |
+
+### WebUI 兼容层（/webui/*）
+
+适配 AgentScope Web UI 前端，`server_url` 设为 `http://localhost:8090/webui` 即可。
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| GET | `/webui/health` | 健康检查 |
+| GET/POST/PATCH/DELETE | `/webui/agent/*` | Agent 管理 |
+| GET/PATCH/DELETE | `/webui/mcp/*` | MCP 管理 |
+| GET/DELETE | `/webui/skill/*` | Skill 管理 |
+| GET/POST/PATCH/DELETE | `/webui/sessions/*` | 会话管理 |
+| POST | `/webui/sessions/{id}/interrupt` | 中断会话 |
+| POST | `/webui/chat/` | 触发聊天 |
+| GET/POST/PATCH/DELETE | `/webui/schedule/*` | 定时任务 |
+| GET | `/webui/workspace/*` | 工作区浏览 |
+
+### 文档
+
+| 路径 | 说明 |
+|------|------|
+| `/docs` | Swagger API 文档 |
+| `/redoc` | ReDoc API 文档 |
 
 ### 流式对话事件类型
 
@@ -115,7 +191,8 @@ APP_ENV=dev python main.py
 
 ```
 platform-server-8090/
-├── main.py                    # FastAPI 入口 (端口 8090) — 自有平台服务
+├── main.py                    # 启动入口 — 配置加载 + 日志 + OTel + uvicorn
+├── server.py                  # FastAPI 应用 — create_app(config) + lifespan + 路由注册
 ├── api/
 │   ├── chat.py                # 对话 API 路由（/chat, /chat/stream, /sessions/*）
 │   └── static/index.html      # 前端对话界面（侧边栏会话历史）
