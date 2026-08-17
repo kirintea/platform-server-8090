@@ -37,12 +37,17 @@ class AgentFactory:
     # ------------------------------------------------------------------
 
     @staticmethod
-    def create(config: AppConfig, state: AgentState | None = None) -> Agent:
+    def create(
+        config: AppConfig,
+        state: AgentState | None = None,
+        user_id: str | None = None,
+    ) -> Agent:
         """根据配置创建完整的 Agent 实例
 
         Args:
             config: 应用配置
             state: 已有的 AgentState（从 Redis 恢复时使用），为 None 则创建新状态
+            user_id: 用户标识（sandbox_per_user 启用时用于拼接沙箱路径）
 
         Returns:
             配置好的 Agent 实例
@@ -51,10 +56,10 @@ class AgentFactory:
         model = AgentFactory._create_model(config.llm)
 
         # 2. 创建 Toolkit
-        toolkit = AgentFactory._create_toolkit(config)
+        toolkit = AgentFactory._create_toolkit(config, user_id=user_id)
 
         # 3. 创建中间件列表
-        middlewares = AgentFactory._create_middlewares(config)
+        middlewares = AgentFactory._create_middlewares(config, user_id=user_id)
 
         # 4. 创建 Agent 配置
         react_config = ReActConfig(
@@ -129,7 +134,10 @@ class AgentFactory:
         )
 
     @staticmethod
-    def _create_toolkit(config: AppConfig) -> Toolkit:
+    def _create_toolkit(
+        config: AppConfig,
+        user_id: str | None = None,
+    ) -> Toolkit:
         """组装 Toolkit：配置驱动的工具 + MCP + Skills"""
         import os
 
@@ -137,8 +145,12 @@ class AgentFactory:
         tool_manager = ToolManagerMiddleware(config.agent.tool_manager.config_path)
         tools = tool_manager.load_tools()
 
-        # MCP 客户端
+        # 沙箱根目录（按需追加 user_id）
         sandbox_dir = os.path.abspath(config.agent.sandbox_dir)
+        if config.agent.sandbox_per_user and user_id:
+            sandbox_dir = os.path.join(sandbox_dir, user_id)
+
+        # MCP 客户端
         if config.agent.sandbox_mcp:
             # MCP 配置从 sandbox_dir/mcp/ 加载（预留，当前 MCP 配置仍在 yaml 中）
             pass
@@ -182,7 +194,10 @@ class AgentFactory:
         return clients
 
     @staticmethod
-    def _create_middlewares(config: AppConfig) -> list:
+    def _create_middlewares(
+        config: AppConfig,
+        user_id: str | None = None,
+    ) -> list:
         """创建中间件列表"""
         middlewares = []
 
@@ -205,6 +220,8 @@ class AgentFactory:
         # 沙箱路径守卫中间件（路径级）— 始终启用
         import os
         sandbox_dir = os.path.abspath(config.agent.sandbox_dir)
+        if config.agent.sandbox_per_user and user_id:
+            sandbox_dir = os.path.join(sandbox_dir, user_id)
         middlewares.append(PathGuardMiddleware(sandbox_dir=sandbox_dir))
 
         return middlewares

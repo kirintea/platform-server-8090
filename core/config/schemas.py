@@ -102,6 +102,10 @@ class AgentConfig(BaseModel):
         default=False,
         description="true 时 MCP 配置从 sandbox_dir 下加载（mcp/ 子目录）",
     )
+    sandbox_per_user: bool = Field(
+        default=False,
+        description="true 时沙箱路径追加 user_id 层级（workspaces/{user_id}/）",
+    )
     tool_guard: ToolGuardConfig = Field(default_factory=ToolGuardConfig, description="工具守卫配置")
     command_guard: CommandGuardConfig = Field(default_factory=CommandGuardConfig, description="命令内容守卫配置")
     tool_manager: ToolManagerConfig = Field(default_factory=ToolManagerConfig, description="工具管理器配置")

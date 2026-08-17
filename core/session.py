@@ -150,8 +150,10 @@ class SessionManager:
             if saved_state is None:
                 saved_state = await self._backfill_from_pg(user_id, session_id)
 
-            # 创建 Agent 实例（传入恢复的状态）
-            agent = AgentFactory.create(self._config, state=saved_state)
+            # 创建 Agent 实例（传入恢复的状态 + user_id 用于沙箱隔离）
+            agent = AgentFactory.create(
+                self._config, state=saved_state, user_id=user_id,
+            )
             entry = SessionEntry(
                 user_id=user_id,
                 session_id=session_id,

@@ -57,9 +57,11 @@ agent:
   context_trigger_ratio: 0.8
   context_reserve_ratio: 0.1
   permission_mode: "bypass"
+  # 沙箱配置（三个均启用时：workspaces/{user_id}/ + 独立 skills/ + 独立 mcp/）
   sandbox_dir: "workspaces"
   sandbox_skills: false      # true 时 skills 从 sandbox_dir/skills/ 加载
   sandbox_mcp: false         # true 时 MCP 配置从 sandbox_dir/mcp/ 加载
+  sandbox_per_user: true    # true 时沙箱路径追加 user_id 层级（workspaces/{user_id}/）
   tool_guard:
     enabled: false
     mode: "allowlist" # allowlist | blocklist
