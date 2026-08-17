@@ -1,0 +1,58 @@
+# ============================================================
+# 工具选择性加载配置
+# 所有工具默认 enabled，按需关闭
+# ============================================================
+
+# 内置工具（AgentScope 自带）
+builtin_tools:
+  Bash:
+    enabled: true
+    description: "执行 shell 命令"
+  Read:
+    enabled: true
+    description: "读取文件"
+  Write:
+    enabled: true
+    description: "写入文件"
+  Edit:
+    enabled: true
+    description: "编辑文件（精确替换）"
+  Glob:
+    enabled: true
+    description: "按模式搜索文件路径"
+  Grep:
+    enabled: true
+    description: "按正则搜索文件内容"
+  TaskCreate:
+    enabled: true
+    description: "创建任务"
+  TaskList:
+    enabled: true
+    description: "列出任务"
+  TaskGet:
+    enabled: true
+    description: "获取任务详情"
+  TaskUpdate:
+    enabled: true
+    description: "更新任务状态"
+  PowerShell:
+    enabled: false
+    description: "执行 PowerShell 命令（默认关闭，Windows 可选）"
+
+# 自定义工具（项目内开发）
+# 示例：
+#   类式工具（继承 ToolBase）：
+#     - name: "WebSearch"
+#       module: "tools.web_search"
+#       class_name: "WebSearchTool"
+#       enabled: true
+#       kwargs:
+#         api_key: "${SEARCH_API_KEY}"
+#
+#   函数式工具（FunctionTool 包装）：
+#     - name: "GetTime"
+#       module: "tools.utils"
+#       func_name: "get_current_time"
+#       enabled: true
+#       is_read_only: true
+custom_tools: []

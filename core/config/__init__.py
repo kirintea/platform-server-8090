@@ -3,7 +3,9 @@
 from .schemas import (
     AgentConfig,
     AppConfig,
+    BuiltinToolEntry,
     CommandGuardConfig,
+    CustomToolEntry,
     DatabaseConfig,
     LLMConfig,
     MCPConfig,
@@ -11,6 +13,7 @@ from .schemas import (
     RedisConfig,
     ServerConfig,
     ToolGuardConfig,
+    ToolManagerConfig,
 )
 from .manager import ConfigManager
 from .resolver import EnvVarResolver
@@ -18,8 +21,10 @@ from .resolver import EnvVarResolver
 __all__ = [
     "AgentConfig",
     "AppConfig",
+    "BuiltinToolEntry",
     "CommandGuardConfig",
     "ConfigManager",
+    "CustomToolEntry",
     "DatabaseConfig",
     "EnvVarResolver",
     "LLMConfig",
@@ -28,4 +33,5 @@ __all__ = [
     "RedisConfig",
     "ServerConfig",
     "ToolGuardConfig",
+    "ToolManagerConfig",
 ]

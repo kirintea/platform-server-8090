@@ -76,6 +76,10 @@ agent:
       - "certutil*"             # 拦截 Windows 下载
       - "curl *|*"              # 拦截 curl 管道 (curl 下载可以，管道不行)
 
+  # 工具管理器 — 从 configs/tools.yaml 选择性加载工具
+  tool_manager:
+    config_path: "configs/tools.yaml"
+
 # MCP 服务列表 (可选)
 mcp_servers: []
   # - name: "filesystem"

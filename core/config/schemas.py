@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 from pydantic import BaseModel, Field
 
 
@@ -55,6 +57,31 @@ class CommandGuardConfig(BaseModel):
     rules: list[str] = Field(default_factory=list, description="命令匹配规则 (fnmatch 通配符)")
 
 
+class BuiltinToolEntry(BaseModel):
+    """单个内置工具配置"""
+    enabled: bool = Field(default=True, description="是否启用")
+    description: str = Field(default="", description="工具描述（覆盖默认）")
+
+
+class CustomToolEntry(BaseModel):
+    """自定义工具配置"""
+    name: str = Field(description="工具名称")
+    module: str = Field(description="Python 模块路径 (如 tools.web_search)")
+    class_name: str | None = Field(default=None, description="ToolBase 子类名")
+    func_name: str | None = Field(default=None, description="函数名（用 FunctionTool 包装）")
+    enabled: bool = Field(default=True, description="是否启用")
+    is_read_only: bool = Field(default=False, description="是否只读")
+    kwargs: dict[str, Any] = Field(default_factory=dict, description="构造参数")
+
+
+class ToolManagerConfig(BaseModel):
+    """工具管理器配置"""
+    config_path: str = Field(
+        default="configs/tools.yaml",
+        description="工具配置文件路径",
+    )
+
+
 class AgentConfig(BaseModel):
     """Agent 行为配置"""
     name: str = Field(default="platform_agent", description="Agent 名称")
@@ -65,6 +92,7 @@ class AgentConfig(BaseModel):
     permission_mode: str = Field(default="bypass", description="权限模式: auto / bypass")
     tool_guard: ToolGuardConfig = Field(default_factory=ToolGuardConfig, description="工具守卫配置")
     command_guard: CommandGuardConfig = Field(default_factory=CommandGuardConfig, description="命令内容守卫配置")
+    tool_manager: ToolManagerConfig = Field(default_factory=ToolManagerConfig, description="工具管理器配置")
 
 
 class MCPConfig(BaseModel):

@@ -16,19 +16,7 @@ from agentscope.credential import OpenAICredential
 from agentscope.middleware import TracingMiddleware
 from agentscope.model import OpenAIChatModel
 from agentscope.state import AgentState
-from agentscope.tool import (
-    Bash,
-    Edit,
-    Glob,
-    Grep,
-    Read,
-    TaskCreate,
-    TaskGet,
-    TaskList,
-    TaskUpdate,
-    Toolkit,
-    Write,
-)
+from agentscope.tool import Toolkit
 from agentscope.mcp import MCPClient, StdioMCPConfig, HttpMCPConfig
 from agentscope.skill import LocalSkillLoader
 from pydantic import SecretStr
@@ -37,6 +25,7 @@ from core.config.schemas import AppConfig, LLMConfig, MCPConfig
 from core.formatter import SiliconFlowFormatter
 from middleware.tool_guard import ToolGuardMiddleware
 from middleware.command_guard import CommandGuardMiddleware
+from middleware.tool_manager import ToolManagerMiddleware
 
 
 class AgentFactory:
@@ -140,21 +129,10 @@ class AgentFactory:
 
     @staticmethod
     def _create_toolkit(config: AppConfig) -> Toolkit:
-        """组装 Toolkit：内置工具 + 任务管理 + MCP + Skills"""
-        # 内置工具
-        builtin_tools = [
-            Bash(),
-            Read(),
-            Write(),
-            Edit(),
-            Glob(),
-            Grep(),
-            # 任务规划工具（支持复杂长任务拆解）
-            TaskCreate(),
-            TaskList(),
-            TaskGet(),
-            TaskUpdate(),
-        ]
+        """组装 Toolkit：配置驱动的工具 + MCP + Skills"""
+        # 从配置文件加载工具（替代硬编码列表）
+        tool_manager = ToolManagerMiddleware(config.agent.tool_manager.config_path)
+        tools = tool_manager.load_tools()
 
         # MCP 客户端
         mcp_clients = AgentFactory._create_mcp_clients(config.mcp_servers)
@@ -168,7 +146,7 @@ class AgentFactory:
             pass  # skills 目录不存在时忽略
 
         return Toolkit(
-            tools=builtin_tools,
+            tools=tools,
             mcps=mcp_clients or None,
             skills_or_loaders=skill_loaders or None,
         )
