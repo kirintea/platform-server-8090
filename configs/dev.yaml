@@ -58,7 +58,7 @@ agent:
   context_reserve_ratio: 0.1
   permission_mode: "bypass"
   tool_guard:
-    enabled: true
+    enabled: false
     mode: "allowlist" # allowlist | blocklist
     tools: []
 
