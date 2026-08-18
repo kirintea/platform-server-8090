@@ -35,3 +35,6 @@ _tmp_*
 example
 docker_images
 docs
+
+# WebUI 前端
+webui/node_modules/

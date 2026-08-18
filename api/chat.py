@@ -3,7 +3,6 @@
 """对话 API 路由
 
 端点：
-- POST /chat          — 非流式对话（等待完整回复）
 - POST /chat/stream   — 流式对话（SSE 事件流）
 - POST /chat/         — Fire-and-Forget 触发（新版）
 - GET  /sessions/{session_id}/stream — SSE 事件流订阅（新版）
@@ -77,14 +76,6 @@ class ChatRequest(BaseModel):
     )
 
 
-class ChatResponse(BaseModel):
-    """对话响应"""
-    reply: str = Field(description="Agent 回复文本")
-    user_id: str = Field(description="用户标识")
-    session_id: str = Field(description="会话 ID")
-    reply_id: str = Field(default="", description="回复 ID")
-
-
 # ============================================================
 # SSE 事件格式化
 # ============================================================
@@ -98,38 +89,6 @@ def _sse_event(event_type: str, data: dict | str) -> str:
 # ============================================================
 # 端点
 # ============================================================
-
-@router.post("/chat", response_model=ChatResponse)
-async def chat(request: Request, body: ChatRequest):
-    """非流式对话 — 等待完整回复后返回"""
-    session_mgr = request.app.state.session_manager
-    db = getattr(request.app.state, "database_manager", None)
-
-    # 确保 session_id
-    session_id = body.session_id or str(uuid.uuid4())
-
-    # 获取或创建该会话的 Agent
-    agent = await session_mgr.get_or_create(body.user_id, session_id)
-
-    user_msg = UserMsg(name="user", content=body.message)
-    reply_msg = await agent.reply(user_msg)
-
-    # 先返回响应
-    response = ChatResponse(
-        reply=reply_msg.get_text_content(),
-        user_id=body.user_id,
-        session_id=session_id,
-        reply_id=getattr(reply_msg, "id", ""),
-    )
-
-    # 后台异步持久化（不阻塞响应）
-    asyncio.create_task(_persist_conversation(
-        session_mgr, db, body.user_id, session_id,
-        body.message, reply_msg.get_text_content(),
-    ))
-
-    return response
-
 
 @router.post("/chat/stream")
 async def chat_stream(request: Request, body: ChatRequest):

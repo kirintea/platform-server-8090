@@ -23,6 +23,7 @@ from core.storage_models import (
     MCPRecord,
     MessageRecord,
     ScheduleRecord,
+    ScheduleSource,
     SessionConfig,
     SessionRecord,
     SessionSource,

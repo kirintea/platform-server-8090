@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 
-"""Schedule 定时任务 API 路由
+"""Schedule 定时任务 API 路由（暂时未使用，路由未注册）
 
 端点：
 - GET    /schedule                — 列出定时任务

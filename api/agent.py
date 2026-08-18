@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
+# 没想好，不使用
 
-"""Agent CRUD API 路由
+"""Agent CRUD API 路由（暂时未使用，路由未注册）
 
 端点：
 - GET    /agent             — 列出所有 Agent

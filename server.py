@@ -25,12 +25,14 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from api.chat import router as chat_router
-from api.agent import router as agent_router
 from api.mcp import router as mcp_router
 from api.skill import router as skill_router
-from api.workspace import router as workspace_router
-from api.schedule import router as schedule_router
-from api.webui import router as webui_router
+from api.ws_chat import router as ws_chat_router
+# from api.agent import router as agent_router
+# from api.workspace import router as workspace_router
+# from api.schedule import router as schedule_router
+# from api.webui import router as webui_router
+
 from core.chat_service import ChatService
 from core.config import ConfigManager
 from core.database import DatabaseManager
@@ -126,7 +128,7 @@ def create_app(config) -> FastAPI:
     app = FastAPI(
         title="AgentScope Platform Server",
         description="基于 AgentScope 2.0.5 的对话智能体平台",
-        version="0.1.0",
+        version="0.1.3",
         lifespan=lifespan,
     )
 
@@ -135,22 +137,37 @@ def create_app(config) -> FastAPI:
 
     @app.get("/")
     async def serve_frontend():
-        """前端对话界面"""
+        """前端对话界面（旧版）"""
         index_path = os.path.join(_static_dir, "index.html")
         if os.path.exists(index_path):
             return FileResponse(index_path)
         return {"error": "Frontend not found", "path": index_path}
 
+    @app.get("/webui")
+    @app.get("/webui/{path:path}")
+    async def serve_webui(path: str = ""):
+        """新版 WebUI 入口"""
+        webui_dir = os.path.join(os.getcwd(), "webui", "dist")
+        if not os.path.isdir(webui_dir):
+            return {"error": "WebUI not built", "hint": "cd webui && npm run build"}
+        file_path = os.path.join(webui_dir, path) if path else os.path.join(webui_dir, "index.html")
+        if os.path.exists(file_path) and os.path.isfile(file_path):
+            return FileResponse(file_path)
+        # SPA fallback: 非文件路径都返回 index.html
+        return FileResponse(os.path.join(webui_dir, "index.html"))
+
     # ============================================================
     # 3. 注册 API 路由
     # ============================================================
     app.include_router(chat_router, tags=["chat"])
-    app.include_router(agent_router)
     app.include_router(mcp_router)
     app.include_router(skill_router)
-    app.include_router(workspace_router)
-    app.include_router(schedule_router)
-    app.include_router(webui_router)  # WebUI 兼容层 (/webui/*)
+    app.include_router(ws_chat_router, tags=["websocket"])
+
+    # app.include_router(agent_router)  # 暂未使用
+    # app.include_router(workspace_router)
+    # app.include_router(schedule_router)  # 暂未使用
+    # app.include_router(webui_router)  # WebUI 兼容层 (/webui/*)
 
     # 静态文件服务（CSS/JS 等）
     app.mount("/static", StaticFiles(directory=_static_dir), name="static")

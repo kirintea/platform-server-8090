@@ -9,8 +9,8 @@
 4. 子会话消息历史与父会话一致（深拷贝：条数相等 + 内容一致）
 5. GET /sessions/{user_id} 富化逻辑：子会话透传 parent_session_id / depth
 
-测试使用同步 POST /chat 端点创建父会话（而非 fire-and-forget POST /chat/），
-确保 LLM 回复完成且 state 持久化到 Redis 后再执行 fork。
+测试使用 POST /chat/stream 端点创建父会话，消费完整 SSE 流确保
+LLM 回复完成且 state 持久化到 Redis 后再执行 fork。
 测试前清理 Redis 中可能残留的旧 state/meta/lock，避免历史运行污染。
 """
 
@@ -51,15 +51,16 @@ def client():
 
 
 def test_fork_endpoint_creates_branch(client):
-    # 1. POST /chat 同步触发对话，确保 state 持久化到 Redis
-    r = client.post("/chat", json={
+    # 1. POST /chat/stream 触发对话，消费 SSE 流确保 state 持久化到 Redis
+    with client.stream("POST", "/chat/stream", json={
         "user_id": UID,
         "session_id": SID,
         "message": "你好，请记住我叫小明",
-    })
-    assert r.status_code == 200, f"POST /chat 失败: {r.status_code} {r.text}"
-    sid = r.json().get("session_id")
-    assert sid == SID
+    }) as r:
+        assert r.status_code == 200, f"POST /chat/stream 失败: {r.status_code}"
+        for line in r.iter_lines():
+            pass
+    sid = SID
 
     # 2. fork
     r2 = client.post(f"/sessions/{UID}/{sid}/fork")

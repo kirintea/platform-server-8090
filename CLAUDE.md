@@ -15,53 +15,69 @@ platform-server-8090/
 ├── main.py                    # 启动入口 — 配置加载 + 日志 + OTel + uvicorn
 ├── server.py                  # FastAPI 应用 — create_app(config) + lifespan + 路由注册
 ├── api/
-│   ├── chat.py                # 对话 API 路由（/chat, /chat/stream, /sessions/*）
-│   ├── agent.py               # Agent CRUD（/agent）
+│   ├── chat.py                # 对话 API 路由（/chat/stream, /chat/, /sessions/*）
+│   ├── ws_chat.py             # WebSocket 对话端点（/ws/chat）
 │   ├── mcp.py                 # MCP 管理（/mcp）
 │   ├── skill.py               # Skill 管理（/skill）
-│   ├── workspace.py           # 工作区（/workspace）
-│   ├── schedule.py            # 定时任务（/schedule）
-│   ├── webui.py               # WebUI 兼容层（/webui/*）
-│   └── static/index.html      # 前端对话界面
+│   └── static/                # 旧版前端对话界面（index.html + chat.js）
 ├── core/
 │   ├── agent/factory.py       # Agent 工厂（模型/工具/中间件组装）
 │   ├── config/                # 配置加载（YAML + 环境变量）
-│   │   └── schemas.py         # Pydantic Schema
+│   │   ├── schemas.py         # Pydantic Schema
+│   │   ├── loader.py          # YAML 加载器
+│   │   ├── manager.py         # ConfigManager 单例
+│   │   └── resolver.py        # 环境变量解析器
 │   ├── database.py            # PostgreSQL 管理器（asyncpg 连接池 + 自动建表）
+│   ├── storage.py             # PostgreSQL 存储层（Agent/Session/MCP/Skill/Message CRUD）
+│   ├── storage_models.py      # 数据模型定义（AgentRecord/MCPRecord/SkillRecord 等）
+│   ├── chat_service.py        # Chat 服务层（Fire-and-Forget 事件驱动模式）
+│   ├── session.py             # 会话管理器（Redis 持久化 + 元数据 + 消息历史 + fork）
+│   ├── redis_message_bus.py   # Redis 分布式消息总线（分布式锁 + Pub/Sub）
+│   ├── message_bus.py         # 消息总线抽象
 │   ├── formatter/             # 自定义 Formatter（SiliconFlow 兼容）
 │   │   ├── __init__.py
 │   │   └── siliconflow.py     # SiliconFlowFormatter（content list 扁平化）
-│   ├── session.py             # 会话管理器（Redis 持久化 + 元数据 + 消息历史）
 │   ├── workspace.py           # 自有 LocalWorkspaceManager（base_dir="./workspaces"）
-│   └── tracing/               # OTel 追踪初始化
+│   ├── log/                   # 日志初始化（loguru + 文件轮转）
+│   └── tracing/               # OTel 追踪初始化 + 装饰器
+├── middleware/
+│   ├── tool_guard.py          # 工具名级黑白名单中间件
+│   ├── command_guard.py       # 命令内容级安全守卫（拦截危险命令）
+│   ├── path_guard.py          # 路径访问守卫
+│   └── tool_manager.py        # 工具管理器（从 configs/tools.yaml 选择性加载）
+├── webui/                     # 新版 React 19 SPA（/webui）
+│   ├── src/                   # 源码（React + TypeScript + TailwindCSS）
+│   ├── dist/                  # 构建产物（由 server.py 直接服务）
+│   └── package.json           # 前端依赖
 ├── health_check/              # 健康检查工具集（可单独执行）
 │   ├── check_all.py           # 总入口：一键运行所有检查
 │   ├── check_http.py          # HTTP 服务 + API 端点检查
 │   ├── check_redis.py         # Redis 连接读写检查
 │   ├── check_postgres.py      # PostgreSQL 连接表结构检查
 │   └── check_llm.py           # LLM API 可达性检查
-├── middleware/
-│   └── tool_guard.py          # 工具黑白名单中间件
 ├── workflow/
 │   └── base.py                # 自用工作流基类
 ├── workspaces/                # 统一沙箱与工作路径
-│   └── {agent_id}/            # Agent 工作区（skills/.mcp 等）
+├── tests/                     # 单元测试
 ├── configs/
 │   ├── dev.yaml               # 开发环境配置
-│   └── prod.yaml              # 生产环境配置
+│   ├── prod.yaml              # 生产环境配置
+│   └── tools.yaml             # 工具选择性加载配置
 ├── docker/
 │   ├── docker-compose.yaml    # 可观测性栈 + Redis + PostgreSQL
 │   ├── deploy_yml/            # 模块化部署 compose 文件（dev/各数据库独立）
-│   ├── exports/               # 导出的 Docker 镜像 tar 包
 │   └── *.yaml / *.yml         # OTel/Prometheus/Loki 配置
 ├── docs/                      # 设计文档
 │   ├── agentscope-guide.md    # AgentScope 使用指南
 │   ├── refactor-plan.md       # 重构规划
-│   └── health-check-plan.md   # 健康检查规划
-├── skills/                    # 自定义 Skill 目录
+│   ├── health-check-plan.md   # 健康检查规划
+│   ├── webui-plan.md          # WebUI 设计
+│   ├── websocket-plan.md      # WebSocket 通道设计
+│   ├── sandbox-plan.md        # 沙箱隔离设计
+│   └── tool-middleware-plan.md # 工具守卫设计
 ├── scripts/
 │   └── start_8090.sh          # 启动 8090 自有平台层（VENV_PATH 可配置）
-├── .env                       # 环境变量（LLM_API_KEY 等）
+├── .env.example               # 环境变量模板
 ├── pyproject.toml             # 项目依赖
 └── requirements.txt           # 锁定依赖
 ```
@@ -72,16 +88,17 @@ platform-server-8090/
 
 - **main.py** — 启动入口：配置加载、日志初始化、OTel 初始化、uvicorn 启动
 - **server.py** — FastAPI 应用：`create_app(config)` 工厂函数、lifespan 资源管理、路由注册
-- 自有 SessionManager、DatabaseManager、RedisMessageBus
-- 面向 `api/static/index.html` 旧版前端
+- 自有 SessionManager、DatabaseManager、RedisMessageBus、PostgresStorage、ChatService
 - 会话存储：Redis `agentscope:session:*` 前缀
 - 工作区：`workspaces/{user_id}/{session_id}/`
 
 ### 访问入口
 
-| 前端 | 地址 | 后端 |
+| 前端 | 地址 | 说明 |
 |------|------|------|
-| 旧版静态界面 | `http://localhost:8090/` | main.py (8090) |
+| 新版 WebUI | `http://localhost:8090/webui` | React 19 SPA（需先构建） |
+| 旧版静态界面 | `http://localhost:8090/` | api/static/index.html |
+| Swagger 文档 | `http://localhost:8090/docs` | API 文档 |
 
 ### 统一沙箱与工作路径 — workspaces/
 
@@ -92,7 +109,7 @@ platform-server-8090/
 
 ## 关键配置
 
-### 环境变量（.env）
+### 环境变量（.env.example）
 
 ```bash
 # LLM 配置（必填）
@@ -115,6 +132,51 @@ APP_ENV=dev
 
 > YAML 配置中所有外部依赖地址均支持 `${VAR:-default}` 语法，未设置环境变量时使用默认值。
 
+## API 端点
+
+### 对话（chat）
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| POST | `/chat/stream` | 流式对话（SSE 事件流） |
+| POST | `/chat/` | Fire-and-Forget 触发（事件驱动） |
+| GET | `/sessions/{session_id}/stream` | SSE 事件流订阅 |
+| GET | `/health` | 健康检查 |
+
+### WebSocket 对话
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| WS | `/ws/chat?user_id={user_id}&session_id={session_id}` | 全双工 WebSocket 对话通道 |
+
+### 会话（session）
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| GET | `/sessions` | 列出内存中活跃会话（可选 `user_id` 过滤） |
+| GET | `/sessions/{user_id}` | 列出用户所有历史会话（Redis SCAN） |
+| GET | `/sessions/{user_id}/{session_id}/messages` | 获取会话消息历史 |
+| POST | `/sessions/{user_id}/{session_id}/fork` | 基于父会话创建分支 |
+| DELETE | `/sessions/{user_id}/{session_id}` | 删除会话 |
+
+### MCP 管理
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| GET | `/mcp` | 列出已安装 MCP |
+| POST | `/mcp` | 添加 MCP |
+| PATCH | `/mcp/{mcp_id}` | 更新 MCP（启用/禁用、改名） |
+| DELETE | `/mcp/{mcp_id}` | 删除 MCP |
+
+### Skill 管理
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| GET | `/skill` | 列出已安装 Skill |
+| POST | `/skill` | 添加 Skill |
+| GET | `/skill/{skill_id}` | 获取单个 Skill |
+| DELETE | `/skill/{skill_id}` | 删除 Skill |
+
 ## 会话与持久化
 
 ### 架构
@@ -127,16 +189,20 @@ SessionManager
       └── agentscope:session:{user_id}:{session_id}:meta → 会话元数据 JSON (TTL 1800s)
           {session_id, user_id, title, created_at, last_active, message_count}
 
-DatabaseManager (PostgreSQL)
-  └── asyncpg 连接池
+PostgresStorage (PostgreSQL)
+  └── DatabaseManager asyncpg 连接池
       ├── users 表           — 用户元数据
-      └── conversations 表   — 对话历史（user_id, session_id, role, content, metadata）
+      ├── conversations 表   — 对话历史（user_id, session_id, role, content, metadata）
+      ├── sessions 表        — 会话记录（parent_session_id, depth）
+      ├── agents 表          — Agent 配置
+      ├── mcps 表            — MCP 配置
+      └── skills 表          — Skill 配置
 ```
 
 ### 关键流程
 
 1. **会话创建**: 先查 Redis，命中则恢复 AgentState，未命中则新建
-2. **会话回复**: reply/stream 完成后，调用 `session_mgr.save()` 同时写入 AgentState 与 `:meta` 元数据
+2. **会话回复**: reply/stream 完成后，调用 `session_mgr.save()` 同时写入 AgentState 与 `:meta` 元数据，异步写入 PG
 3. **会话过期**: 内存中 TTL 过期后清理，Redis 中 key 保留至 TTL 到期
 4. **会话列表**: `list_sessions()` 仅返回内存中活跃会话；`list_user_sessions()` 通过 SCAN 遍历 Redis `:meta` key 返回历史会话
 5. **消息历史**: `get_session_messages()` 从 Redis 加载 AgentState，提取 user/assistant 文本消息返回
@@ -184,3 +250,8 @@ database:
 | [docs/persistence-design.md](docs/persistence-design.md) | 会话持久化设计 |
 | [docs/health-check-plan.md](docs/health-check-plan.md) | 健康检查工具规划 |
 | [docs/refactor-plan.md](docs/refactor-plan.md) | main.py 拆分重构规划 |
+| [docs/webui-plan.md](docs/webui-plan.md) | 新版 WebUI 设计 |
+| [docs/websocket-plan.md](docs/websocket-plan.md) | WebSocket 通道设计 |
+| [docs/sandbox-plan.md](docs/sandbox-plan.md) | 沙箱隔离设计 |
+| [docs/tool-middleware-plan.md](docs/tool-middleware-plan.md) | 工具守卫设计 |
+| [docs/dangerous-commands.md](docs/dangerous-commands.md) | 命令安全守卫说明 |
