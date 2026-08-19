@@ -21,7 +21,21 @@ export interface SessionMessage {
 	id: number;
 	role: 'user' | 'assistant';
 	content: string;
+	metadata?: MessageMetadata | null;
 	created_at?: string;
+}
+
+export interface MessageMetadata {
+	thinking?: string;
+	tool_calls?: ToolCallRecord[];
+}
+
+export interface ToolCallRecord {
+	tool_name: string;
+	tool_call_id: string;
+	tool_args?: unknown;
+	result?: string;
+	state?: string;
 }
 
 export interface MessagesResponse {

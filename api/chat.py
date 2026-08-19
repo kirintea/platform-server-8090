@@ -40,6 +40,9 @@ async def _persist_conversation(
     session_id: str,
     user_message: str,
     assistant_reply: str,
+    *,
+    thinking: str | None = None,
+    tool_calls: list[dict] | None = None,
 ) -> None:
     """后台异步持久化对话（Redis + PG）"""
     try:
@@ -48,7 +51,15 @@ async def _persist_conversation(
         # 写 PG
         if db and db.is_initialized:
             await db.insert_conversation(user_id, session_id, "user", user_message)
-            await db.insert_conversation(user_id, session_id, "assistant", assistant_reply)
+            metadata = {}
+            if thinking:
+                metadata["thinking"] = thinking
+            if tool_calls:
+                metadata["tool_calls"] = tool_calls
+            await db.insert_conversation(
+                user_id, session_id, "assistant", assistant_reply,
+                metadata=metadata or None,
+            )
             # 自动创建/更新 sessions 记录（标题取首条用户消息前30字）
             title = user_message[:30] if user_message else None
             if title:
@@ -120,9 +131,11 @@ async def chat_stream(request: Request, body: ChatRequest):
         # 用于累积工具调用参数和结果
         pending_tool_calls: dict[str, dict] = {}  # tool_call_id -> {name, args_buffer}
         pending_tool_results: dict[str, str] = {}  # tool_call_id -> result_buffer
+        tool_call_records: dict[str, dict] = {}  # tool_call_id -> record（用于持久化）
 
         # 累积完整回复内容，用于 PG 双写
         full_reply = ""
+        full_thinking = ""
 
         try:
             async for event in agent.reply_stream(user_msg):
@@ -140,6 +153,7 @@ async def chat_stream(request: Request, body: ChatRequest):
                         yield _sse_event("text_delta", {"delta": event.delta})
 
                     case EventType.THINKING_BLOCK_DELTA:
+                        full_thinking += event.delta
                         yield _sse_event("thinking_delta", {"delta": event.delta})
 
                     case EventType.TOOL_CALL_START:
@@ -166,9 +180,8 @@ async def chat_stream(request: Request, body: ChatRequest):
                             args = None
                             if tool_info["args_buffer"]:
                                 try:
-                                    import json
                                     args = json.loads(tool_info["args_buffer"])
-                                except:
+                                except (json.JSONDecodeError, TypeError):
                                     args = tool_info["args_buffer"]
                             logger.info("TOOL_CALL_END: id={} name={} args={}", tool_call_id, tool_info["name"], str(args)[:200] if args else None)
                             yield _sse_event("tool_call", {
@@ -176,6 +189,11 @@ async def chat_stream(request: Request, body: ChatRequest):
                                 "tool_call_id": tool_call_id,
                                 "tool_args": args,
                             })
+                            tool_call_records[tool_call_id] = {
+                                "tool_name": tool_info["name"],
+                                "tool_call_id": tool_call_id,
+                                "tool_args": args,
+                            }
 
                     case EventType.TOOL_RESULT_START:
                         tool_call_id = getattr(event, "tool_call_id", "")
@@ -192,12 +210,16 @@ async def chat_stream(request: Request, body: ChatRequest):
                     case EventType.TOOL_RESULT_END:
                         tool_call_id = getattr(event, "tool_call_id", "")
                         result_text = pending_tool_results.pop(tool_call_id, "")
+                        state = str(getattr(event, "state", ""))
                         logger.info("TOOL_RESULT_END: id={} result={}", tool_call_id, result_text[:200] if result_text else "")
                         yield _sse_event("tool_result", {
                             "tool_call_id": tool_call_id,
-                            "state": str(getattr(event, "state", "")),
+                            "state": state,
                             "result": result_text,
                         })
+                        if tool_call_id in tool_call_records:
+                            tool_call_records[tool_call_id]["result"] = result_text
+                            tool_call_records[tool_call_id]["state"] = state
 
                     case EventType.REPLY_END:
                         yield _sse_event("reply_end", {
@@ -217,6 +239,8 @@ async def chat_stream(request: Request, body: ChatRequest):
                 asyncio.create_task(_persist_conversation(
                     session_mgr, db, body.user_id, session_id,
                     body.message, full_reply,
+                    thinking=full_thinking or None,
+                    tool_calls=list(tool_call_records.values()) or None,
                 ))
 
     return StreamingResponse(

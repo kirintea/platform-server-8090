@@ -27,7 +27,7 @@ import redis.asyncio as aioredis
 from agentscope.agent import Agent
 from agentscope.state import AgentState
 
-from agentscope.message import AssistantMsg, UserMsg
+from agentscope.message import AssistantMsg, Msg, UserMsg
 
 from core.agent import AgentFactory
 from core.config.schemas import AppConfig
@@ -670,10 +670,32 @@ class SessionManager:
             for msg in messages:
                 role = msg["role"]
                 content = msg["content"]
+                metadata = msg.get("metadata") or {}
                 if role == "user":
                     context.append(UserMsg(name="user", content=content))
                 elif role == "assistant":
                     context.append(AssistantMsg(name="assistant", content=content))
+                    # 注入工具调用记录到 agent 上下文（用于自我排错）
+                    tool_calls = metadata.get("tool_calls")
+                    if tool_calls:
+                        for tc in tool_calls:
+                            tool_name = tc.get("tool_name", "unknown")
+                            tool_args = tc.get("tool_args", "")
+                            result = tc.get("result", "")
+                            state = tc.get("state", "")
+                            # 格式化为可读的上下文消息
+                            args_str = (
+                                json.dumps(tool_args, ensure_ascii=False)
+                                if isinstance(tool_args, dict)
+                                else str(tool_args)
+                            )
+                            tc_text = f"[Tool Call] {tool_name}({args_str})"
+                            if result:
+                                tc_text += f"\n[Tool Result] ({state}): {result}"
+                            context.append(Msg(
+                                name="system", role="system",
+                                content=[{"type": "text", "text": tc_text}],
+                            ))
 
             if not context:
                 return None

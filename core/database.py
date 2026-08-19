@@ -412,7 +412,7 @@ class DatabaseManager:
         """
         if before_id:
             sql = """
-                SELECT id, role, content, created_at
+                SELECT id, role, content, metadata, created_at
                 FROM conversations
                 WHERE user_id = $1 AND session_id = $2 AND status = 'active' AND id < $3
                 ORDER BY id DESC
@@ -421,13 +421,15 @@ class DatabaseManager:
             rows = await self.fetch(sql, user_id, session_id, before_id, limit)
         else:
             sql = """
-                SELECT id, role, content, created_at
+                SELECT id, role, content, metadata, created_at
                 FROM conversations
                 WHERE user_id = $1 AND session_id = $2 AND status = 'active'
                 ORDER BY id DESC
                 LIMIT $3
             """
             rows = await self.fetch(sql, user_id, session_id, limit)
+
+        import json as _json
 
         # 转为正序
         messages = list(reversed(rows))
@@ -442,6 +444,7 @@ class DatabaseManager:
                     "id": row["id"],
                     "role": row["role"],
                     "content": row["content"],
+                    "metadata": _json.loads(row["metadata"]) if row["metadata"] else None,
                     "created_at": row["created_at"].isoformat() if row["created_at"] else None,
                 }
                 for row in messages

@@ -10,7 +10,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 
 import { sessionApi } from '@/api/session';
-import type { ChatMessage, ToolCallInfo, WsMessage } from '@/api/types';
+import type { ChatMessage, ToolCallInfo, ToolCallRecord, WsMessage } from '@/api/types';
 import { wsManager } from '@/api/ws';
 
 export type ReplyPhase = 'idle' | 'streaming' | 'interrupting';
@@ -166,18 +166,57 @@ export function useMessages(userId: string, sessionId: string | null) {
 		}
 	};
 
-	/** 加载历史消息 */
+	/** 加载历史消息（含 thinking + toolCalls 重建） */
 	const loadHistory = useCallback(async (sid: string) => {
 		if (!userId) return;
 		try {
 			const res = await sessionApi.messages(userId, sid);
-			setMessages(
-				res.messages.map((m, i) => ({
-					id: `hist-${i}`,
-					role: m.role as 'user' | 'assistant',
-					content: m.content,
-				})),
-			);
+			const rebuilt: ChatMessage[] = [];
+
+			for (const m of res.messages) {
+				if (m.role === 'user') {
+					rebuilt.push({
+						id: `hist-${m.id}`,
+						role: 'user',
+						content: m.content,
+					});
+				} else {
+					const meta = m.metadata;
+					// 有思考内容 → 先加一条思考消息
+					if (meta?.thinking) {
+						rebuilt.push({
+							id: `hist-${m.id}-think`,
+							role: 'assistant',
+							content: '',
+							thinking: meta.thinking,
+						});
+					}
+					// 有工具调用 → 加工具消息
+					if (meta?.tool_calls?.length) {
+						rebuilt.push({
+							id: `hist-${m.id}-tool`,
+							role: 'assistant',
+							content: '',
+							toolCalls: meta.tool_calls.map((tc: ToolCallRecord) => ({
+								tool_name: tc.tool_name,
+								tool_call_id: tc.tool_call_id,
+								tool_args: tc.tool_args,
+								result: tc.result,
+								state: tc.state,
+							})),
+						});
+					}
+					// 正文（有内容才添加）
+					if (m.content.trim()) {
+						rebuilt.push({
+							id: `hist-${m.id}`,
+							role: 'assistant',
+							content: m.content,
+						});
+					}
+				}
+			}
+			setMessages(rebuilt);
 		} catch (e) {
 			console.error('加载消息历史失败:', e);
 		}
