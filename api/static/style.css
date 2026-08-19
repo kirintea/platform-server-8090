@@ -235,6 +235,25 @@ body {
 }
 .header-info span { display: flex; align-items: center; gap: 4px; }
 .dot { width: 8px; height: 8px; border-radius: 50%; background: #4caf50; display: inline-block; }
+.btn-webui {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 6px 16px;
+  background: var(--accent) !important;
+  color: #fff !important;
+  border: 1px solid var(--accent-light);
+  border-radius: 8px;
+  font-size: 13px;
+  font-weight: 500;
+  text-decoration: none;
+  transition: all 0.15s;
+  white-space: nowrap;
+}
+.btn-webui:hover {
+  background: var(--accent-light) !important;
+}
 
 /* ---- Messages ---- */
 .messages {

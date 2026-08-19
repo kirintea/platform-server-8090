@@ -693,8 +693,8 @@ class SessionManager:
                             if result:
                                 tc_text += f"\n[Tool Result] ({state}): {result}"
                             context.append(Msg(
-                                name="system", role="system",
-                                content=[{"type": "text", "text": tc_text}],
+                                name="system", role="assistant",
+                                content=[{"type": "text", "text": tc_text}], # type: ignore
                             ))
 
             if not context:

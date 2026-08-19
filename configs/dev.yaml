@@ -2,7 +2,7 @@
 # 通过 APP_ENV=dev 加载 (默认)
 
 otel:
-  enabled: true
+  enabled: false
   endpoint: "${OTEL_ENDPOINT:-http://localhost:4317}"
   service_name: "platform-agent"
   service_version: "0.1.0"
@@ -68,7 +68,7 @@ agent:
     tools: []
 
   command_guard:
-    enabled: true
+    enabled: false
     mode: "blocklist"           # allowlist | blocklist
     rules:
       - "rm -rf /"              # 拦截删根目录
