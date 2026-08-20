@@ -38,6 +38,14 @@ def check_llm_endpoint(base_url: str, api_key: str, model: str, report: CheckRep
         # 401/403 说明端点可达但认证失败
         if e.code in (401, 403):
             report.add("LLM API 端点", True, f"{e.code} 端点可达（认证问题）")
+        elif e.code == 404:
+            # 非 OpenAI 网关（如 DashScope/Anthropic）无 /models 接口，属正常，
+            # 降级为非致命警告并跳过该子检查，不计入失败
+            report.add(
+                "LLM API 端点",
+                True,
+                f"404 网关无 /models 接口（非 OpenAI 兼容），跳过该子检查",
+            )
         else:
             report.add("LLM API 端点", False, "", f"{e.code} {e.reason}")
     except Exception as e:

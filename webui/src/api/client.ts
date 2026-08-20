@@ -37,6 +37,18 @@ async function extractErrorDetail(res: Response): Promise<string> {
 }
 
 async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
+	// 可选 API-Key 鉴权：仅当 setup 中配置了 api_key 时附带 X-API-Key 头（非破坏性）
+	const apiKey = localStorage.getItem('api_key');
+	if (apiKey && apiKey.trim()) {
+		options = {
+			...options,
+			headers: {
+				...(options.headers || {}),
+				'X-API-Key': apiKey.trim(),
+			},
+		};
+	}
+
 	const res = await fetch(path, options);
 
 	if (!res.ok) {

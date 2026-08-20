@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import uuid
 from typing import AsyncGenerator
@@ -30,7 +31,23 @@ from agentscope.message import Msg, UserMsg
 
 from loguru import logger
 
+from core.chat_service import acquire_session_lock, session_lock_key
+from core.validators import coerce_id
+
 router = APIRouter()
+
+# 追踪后台持久化任务，避免被 GC 回收（见 shutdown_persist_tasks）。
+_PERSIST_TASKS: set[asyncio.Task] = set()
+
+
+async def shutdown_persist_tasks() -> None:
+    """优雅等待所有未完成的后台持久化任务完成（服务关闭时调用，避免丢弃在途写入）。
+
+    由 DRAIN 语义替代原先的 cancel()：原先直接 cancel 会在任务尚未落库时丢弃在途写入。
+    """
+    tasks = list(_PERSIST_TASKS)
+    if tasks:
+        await asyncio.gather(*tasks, return_exceptions=True)
 
 
 async def _persist_conversation(
@@ -44,10 +61,10 @@ async def _persist_conversation(
     thinking: str | None = None,
     tool_calls: list[dict] | None = None,
 ) -> None:
-    """后台异步持久化对话（Redis + PG）"""
+    """后台异步持久化对话历史（仅 PG 双写；Redis AgentState 已在锁内同步落库）。"""
     try:
-        # 写 Redis
-        await session_mgr.save(user_id, session_id)
+        # Redis AgentState 已在 /chat/stream 的 async with 锁内同步落库，
+        # 此处仅负责 PG 历史双写（append-only，风险较低）。
         # 写 PG
         if db and db.is_initialized:
             await db.insert_conversation(user_id, session_id, "user", user_message)
@@ -56,10 +73,12 @@ async def _persist_conversation(
                 metadata["thinking"] = thinking
             if tool_calls:
                 metadata["tool_calls"] = tool_calls
-            await db.insert_conversation(
-                user_id, session_id, "assistant", assistant_reply,
-                metadata=metadata or None,
-            )
+            # assistant 消息仅在确有文本产出时写入（tool-only turn 跳过）
+            if assistant_reply:
+                await db.insert_conversation(
+                    user_id, session_id, "assistant", assistant_reply,
+                    metadata=metadata or None,
+                )
             # 自动创建/更新 sessions 记录（标题取首条用户消息前30字）
             title = user_message[:30] if user_message else None
             if title:
@@ -115,16 +134,17 @@ async def chat_stream(request: Request, body: ChatRequest):
     """
     session_mgr = request.app.state.session_manager
     db = getattr(request.app.state, "database_manager", None)
+    bus = getattr(request.app.state, "message_bus", None)
+
+    # 规范化用户 / 会话标识（防止路径穿越等非法输入）
+    user_id = coerce_id(body.user_id)
     session_id = body.session_id or str(uuid.uuid4())
-
-    agent = await session_mgr.get_or_create(body.user_id, session_id)
-
-    user_msg = UserMsg(name="user", content=body.message)
+    session_id = coerce_id(session_id, default=str(uuid.uuid4()))
 
     async def event_generator() -> AsyncGenerator[str, None]:
         # 先发送 session_id，让前端知道当前会话
         yield _sse_event("session", {
-            "user_id": body.user_id,
+            "user_id": user_id,
             "session_id": session_id,
         })
 
@@ -137,98 +157,112 @@ async def chat_stream(request: Request, body: ChatRequest):
         full_reply = ""
         full_thinking = ""
 
+        lock_ctx = (
+            acquire_session_lock(bus, user_id, session_id)
+            if bus is not None else contextlib.nullasynccontext()
+        )
         try:
-            async for event in agent.reply_stream(user_msg):
-                if not hasattr(event, "type"):
-                    if isinstance(event, Msg):
-                        yield _sse_event("reply_end", {
-                            "text": event.get_text_content(),
-                            "finished": True,
-                        })
-                    continue
+            async with lock_ctx:
+                try:
+                    agent = await session_mgr.get_or_create(user_id, session_id)
+                    await session_mgr.refresh_state(user_id, session_id)
+                    user_msg = UserMsg(name="user", content=body.message)
 
-                match event.type:
-                    case EventType.TEXT_BLOCK_DELTA:
-                        full_reply += event.delta
-                        yield _sse_event("text_delta", {"delta": event.delta})
+                    async for event in agent.reply_stream(user_msg):
+                        if not hasattr(event, "type"):
+                            if isinstance(event, Msg):
+                                yield _sse_event("reply_end", {
+                                    "text": event.get_text_content(),
+                                    "finished": True,
+                                })
+                            continue
 
-                    case EventType.THINKING_BLOCK_DELTA:
-                        full_thinking += event.delta
-                        yield _sse_event("thinking_delta", {"delta": event.delta})
+                        match event.type:
+                            case EventType.TEXT_BLOCK_DELTA:
+                                full_reply += event.delta
+                                yield _sse_event("text_delta", {"delta": event.delta})
 
-                    case EventType.TOOL_CALL_START:
-                        tool_call_id = getattr(event, "tool_call_id", "")
-                        tool_name = getattr(event, "tool_call_name", "")
-                        logger.info("TOOL_CALL_START: id={} name={}", tool_call_id, tool_name)
-                        pending_tool_calls[tool_call_id] = {
-                            "name": tool_name,
-                            "args_buffer": "",
-                        }
+                            case EventType.THINKING_BLOCK_DELTA:
+                                full_thinking += event.delta
+                                yield _sse_event("thinking_delta", {"delta": event.delta})
 
-                    case EventType.TOOL_CALL_DELTA:
-                        tool_call_id = getattr(event, "tool_call_id", "")
-                        delta = getattr(event, "delta", "")
-                        logger.info("TOOL_CALL_DELTA: id={} delta={}", tool_call_id, delta[:100] if delta else "")
-                        if tool_call_id in pending_tool_calls:
-                            pending_tool_calls[tool_call_id]["args_buffer"] += delta
+                            case EventType.TOOL_CALL_START:
+                                tool_call_id = getattr(event, "tool_call_id", "")
+                                tool_name = getattr(event, "tool_call_name", "")
+                                logger.info("TOOL_CALL_START: id={} name={}", tool_call_id, tool_name)
+                                pending_tool_calls[tool_call_id] = {
+                                    "name": tool_name,
+                                    "args_buffer": "",
+                                }
 
-                    case EventType.TOOL_CALL_END:
-                        tool_call_id = getattr(event, "tool_call_id", "")
-                        if tool_call_id in pending_tool_calls:
-                            tool_info = pending_tool_calls.pop(tool_call_id)
-                            # 尝试解析参数 JSON
-                            args = None
-                            if tool_info["args_buffer"]:
-                                try:
-                                    args = json.loads(tool_info["args_buffer"])
-                                except (json.JSONDecodeError, TypeError):
-                                    args = tool_info["args_buffer"]
-                            logger.info("TOOL_CALL_END: id={} name={} args={}", tool_call_id, tool_info["name"], str(args)[:200] if args else None)
-                            yield _sse_event("tool_call", {
-                                "tool_name": tool_info["name"],
-                                "tool_call_id": tool_call_id,
-                                "tool_args": args,
-                            })
-                            tool_call_records[tool_call_id] = {
-                                "tool_name": tool_info["name"],
-                                "tool_call_id": tool_call_id,
-                                "tool_args": args,
-                            }
+                            case EventType.TOOL_CALL_DELTA:
+                                tool_call_id = getattr(event, "tool_call_id", "")
+                                delta = getattr(event, "delta", "")
+                                logger.info("TOOL_CALL_DELTA: id={} delta={}", tool_call_id, delta[:100] if delta else "")
+                                if tool_call_id in pending_tool_calls:
+                                    pending_tool_calls[tool_call_id]["args_buffer"] += delta
 
-                    case EventType.TOOL_RESULT_START:
-                        tool_call_id = getattr(event, "tool_call_id", "")
-                        tool_name = getattr(event, "tool_call_name", "")
-                        logger.info("TOOL_RESULT_START: id={} name={}", tool_call_id, tool_name)
-                        pending_tool_results[tool_call_id] = ""
+                            case EventType.TOOL_CALL_END:
+                                tool_call_id = getattr(event, "tool_call_id", "")
+                                if tool_call_id in pending_tool_calls:
+                                    tool_info = pending_tool_calls.pop(tool_call_id)
+                                    # 尝试解析参数 JSON
+                                    args = None
+                                    if tool_info["args_buffer"]:
+                                        try:
+                                            args = json.loads(tool_info["args_buffer"])
+                                        except (json.JSONDecodeError, TypeError):
+                                            args = tool_info["args_buffer"]
+                                    logger.info("TOOL_CALL_END: id={} name={} args={}", tool_call_id, tool_info["name"], str(args)[:200] if args else None)
+                                    yield _sse_event("tool_call", {
+                                        "tool_name": tool_info["name"],
+                                        "tool_call_id": tool_call_id,
+                                        "tool_args": args,
+                                    })
+                                    tool_call_records[tool_call_id] = {
+                                        "tool_name": tool_info["name"],
+                                        "tool_call_id": tool_call_id,
+                                        "tool_args": args,
+                                    }
 
-                    case EventType.TOOL_RESULT_TEXT_DELTA:
-                        tool_call_id = getattr(event, "tool_call_id", "")
-                        delta = getattr(event, "delta", "")
-                        if tool_call_id in pending_tool_results:
-                            pending_tool_results[tool_call_id] += delta
+                            case EventType.TOOL_RESULT_START:
+                                tool_call_id = getattr(event, "tool_call_id", "")
+                                tool_name = getattr(event, "tool_call_name", "")
+                                logger.info("TOOL_RESULT_START: id={} name={}", tool_call_id, tool_name)
+                                pending_tool_results[tool_call_id] = ""
 
-                    case EventType.TOOL_RESULT_END:
-                        tool_call_id = getattr(event, "tool_call_id", "")
-                        result_text = pending_tool_results.pop(tool_call_id, "")
-                        state = str(getattr(event, "state", ""))
-                        logger.info("TOOL_RESULT_END: id={} result={}", tool_call_id, result_text[:200] if result_text else "")
-                        yield _sse_event("tool_result", {
-                            "tool_call_id": tool_call_id,
-                            "state": state,
-                            "result": result_text,
-                        })
-                        if tool_call_id in tool_call_records:
-                            tool_call_records[tool_call_id]["result"] = result_text
-                            tool_call_records[tool_call_id]["state"] = state
+                            case EventType.TOOL_RESULT_TEXT_DELTA:
+                                tool_call_id = getattr(event, "tool_call_id", "")
+                                delta = getattr(event, "delta", "")
+                                if tool_call_id in pending_tool_results:
+                                    pending_tool_results[tool_call_id] += delta
 
-                    case EventType.REPLY_END:
-                        yield _sse_event("reply_end", {
-                            "finished_reason": str(getattr(event, "finished_reason", "")),
-                            "finished": True,
-                        })
+                            case EventType.TOOL_RESULT_END:
+                                tool_call_id = getattr(event, "tool_call_id", "")
+                                result_text = pending_tool_results.pop(tool_call_id, "")
+                                state = str(getattr(event, "state", ""))
+                                logger.info("TOOL_RESULT_END: id={} result={}", tool_call_id, result_text[:200] if result_text else "")
+                                yield _sse_event("tool_result", {
+                                    "tool_call_id": tool_call_id,
+                                    "state": state,
+                                    "result": result_text,
+                                })
+                                if tool_call_id in tool_call_records:
+                                    tool_call_records[tool_call_id]["result"] = result_text
+                                    tool_call_records[tool_call_id]["state"] = state
 
-                    case _:
-                        pass
+                            case EventType.REPLY_END:
+                                yield _sse_event("reply_end", {
+                                    "finished_reason": str(getattr(event, "finished_reason", "")),
+                                    "finished": True,
+                                })
+
+                            case _:
+                                pass
+                finally:
+                    # Redis AgentState 必须在锁内同步落库，避免下一轮 refresh_state
+                    # 读取到过期状态导致本轮对话丢失（state-loss race）。
+                    await session_mgr.save(user_id, session_id)
 
         except GeneratorExit:
             # 客户端断开连接时生成器被关闭，OTel tracing middleware
@@ -239,14 +273,16 @@ async def chat_stream(request: Request, body: ChatRequest):
             logger.exception("流式回复异常")
             yield _sse_event("error", {"message": str(e)})
         finally:
-            # 后台异步持久化（不阻塞流式响应）
-            if full_reply:
-                asyncio.create_task(_persist_conversation(
-                    session_mgr, db, body.user_id, session_id,
-                    body.message, full_reply,
-                    thinking=full_thinking or None,
-                    tool_calls=list(tool_call_records.values()) or None,
-                ))
+            # PG 历史双写为 append-only 且风险较低，保留为 fire-and-forget；
+            # Redis AgentState 已在上方锁内 awaited 落库（state-loss race 修复）。
+            task = asyncio.create_task(_persist_conversation(
+                session_mgr, db, user_id, session_id,
+                body.message, full_reply,
+                thinking=full_thinking or None,
+                tool_calls=list(tool_call_records.values()) or None,
+            ))
+            _PERSIST_TASKS.add(task)
+            task.add_done_callback(_PERSIST_TASKS.discard)
 
     return StreamingResponse(
         event_generator(),
@@ -272,6 +308,9 @@ async def health(request: Request):
 @router.get("/sessions")
 async def list_sessions(request: Request, user_id: str | None = None):
     """列出活跃会话（仅内存中）"""
+    # 规范化用户标识（防止非法输入）；未提供 user_id 时保持 None 以列出全部会话。
+    if user_id is not None:
+        user_id = coerce_id(user_id)
     session_mgr = request.app.state.session_manager
     sessions = await session_mgr.list_sessions(user_id)
     return {"sessions": sessions, "total": len(sessions)}
@@ -284,6 +323,7 @@ async def list_user_sessions(request: Request, user_id: str):
     返回会话元数据列表，包含标题、时间、消息数等信息。
     用于前端侧边栏展示。
     """
+    user_id = coerce_id(user_id)
     db = getattr(request.app.state, "database_manager", None)
     if not db or not db.is_initialized:
         raise HTTPException(503, "数据库未配置")
@@ -309,6 +349,8 @@ async def get_session_messages(
 
     用于前端切换会话时加载聊天记录，支持滚动加载更多。
     """
+    user_id = coerce_id(user_id)
+    session_id = coerce_id(session_id, default=str(uuid.uuid4()))
     db = getattr(request.app.state, "database_manager", None)
     if not db or not db.is_initialized:
         raise HTTPException(503, "数据库未配置")
@@ -329,6 +371,8 @@ async def soft_delete_session(request: Request, user_id: str, session_id: str):
     - PG: 将 conversations 表中该会话所有消息标记为 deleted
     - Redis: 清除会话状态
     """
+    user_id = coerce_id(user_id)
+    session_id = coerce_id(session_id, default=str(uuid.uuid4()))
     db = getattr(request.app.state, "database_manager", None)
     session_mgr = request.app.state.session_manager
 
@@ -364,6 +408,8 @@ async def rename_session(
 
     标题存储在 sessions 表的 config 字段中。
     """
+    user_id = coerce_id(user_id)
+    session_id = coerce_id(session_id, default=str(uuid.uuid4()))
     db = getattr(request.app.state, "database_manager", None)
     if not db or not db.is_initialized:
         raise HTTPException(503, "数据库未配置")
@@ -388,6 +434,8 @@ class ForkSessionResponse(BaseModel):
 @router.post("/sessions/{user_id}/{session_id}/fork", response_model=ForkSessionResponse)
 async def fork_session(request: Request, user_id: str, session_id: str):
     """基于父会话创建分支，返回新会话信息"""
+    user_id = coerce_id(user_id)
+    session_id = coerce_id(session_id, default=str(uuid.uuid4()))
     session_mgr = request.app.state.session_manager
     logger.info("Fork 请求: user={} session={}", user_id, session_id)
 
@@ -446,6 +494,10 @@ async def get_session_context(
     返回当前会话的 token 估算、消息数、压缩状态等。
     用于前端上下文用量指示器。
     """
+    # 规范化用户 / 会话标识（防止路径穿越等非法输入）
+    user_id = coerce_id(user_id)
+    session_id = coerce_id(session_id, default=str(uuid.uuid4()))
+
     session_mgr = request.app.state.session_manager
     config = request.app.state.config
     session_mgr_list = await session_mgr.list_sessions(user_id)
@@ -511,13 +563,15 @@ async def get_session_context(
         for msg in context
     )
 
-    # 检查卸载文件
+    # 检查卸载文件（卸载目录已改为按用户隔离：{sandbox_dir}/{user_id}/sessions/{session_id}）
+    # 从配置派生沙箱根，避免硬编码 "workspaces" 绕过 workspace 单一真源。
     from pathlib import Path
-    offload_dir = Path("workspaces") / "sessions" / session_id
+    sandbox_base = getattr(config.agent, "sandbox_dir", "workspaces")
+    offload_dir = Path(sandbox_base) / user_id / "sessions" / session_id
     offloaded_files = []
     if offload_dir.is_dir():
         offloaded_files = [
-            str(f.relative_to(Path("workspaces")))
+            str(f.relative_to(Path(sandbox_base) / user_id))
             for f in offload_dir.iterdir()
             if f.is_file()
         ]
@@ -546,6 +600,8 @@ async def compress_session(
     调用 Agent 的 compress_context 方法，将历史消息压缩为摘要。
     压缩前会先通过 Offloader 卸载被移除的内容。
     """
+    user_id = coerce_id(user_id)
+    session_id = coerce_id(session_id, default=str(uuid.uuid4()))
     session_mgr = request.app.state.session_manager
 
     # 确保会话已加载
@@ -580,20 +636,24 @@ async def chat_trigger(request: Request, body: ChatTriggerRequest):
     """
     chat_service = request.app.state.chat_service
     message_bus = request.app.state.message_bus
-    session_id = body.session_id or str(uuid.uuid4())
+    db = getattr(request.app.state, "database_manager", None)
 
-    # 检查是否已有 run 在执行
-    from agentscope.app.message_bus import MessageBusKeys
-    lock_key = MessageBusKeys.session_lock(session_id)
+    # 规范化用户 / 会话标识（防止路径穿越等非法输入）
+    user_id = coerce_id(body.user_id)
+    session_id = body.session_id or str(uuid.uuid4())
+    session_id = coerce_id(session_id, default=str(uuid.uuid4()))
+
+    # 检查是否已有 run 在执行（与 run() 内部使用的锁 key 一致）
+    lock_key = session_lock_key(user_id, session_id)
     if await message_bus.is_locked(lock_key):
         return JSONResponse(
             status_code=409,
             content={"detail": "该会话已有对话在执行中"},
         )
 
-    # 后台触发 chat run
+    # 后台触发 chat run（传入 db 以进行 PG 双写）
     asyncio.create_task(
-        chat_service.run(body.user_id, session_id, body.message)
+        chat_service.run(user_id, session_id, body.message, db)
     )
 
     return ChatTriggerResponse(status="started", session_id=session_id)
@@ -605,6 +665,7 @@ async def session_event_stream(request: Request, session_id: str):
 
     先回放已有事件，然后订阅实时事件。
     """
+    session_id = coerce_id(session_id, default=str(uuid.uuid4()))
     from agentscope.app.message_bus import MessageBusKeys
 
     message_bus = request.app.state.message_bus

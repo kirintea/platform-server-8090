@@ -62,12 +62,29 @@ agent:
   sandbox_dir: "workspaces"
   sandbox_skills: false      # true 时 skills 从 sandbox_dir/skills/ 加载
   sandbox_mcp: false         # true 时 MCP 配置从 sandbox_dir/mcp/ 加载
-  sandbox_per_user: false    # true 时沙箱路径追加 user_id 层级（workspaces/{user_id}/）
+  sandbox_per_user: true    # true 时沙箱路径追加 user_id 层级（workspaces/{user_id}/）
+  # tool_guard 的匹配规则为已知有缺陷的实现，可能在生产环境产生误判或漏拦，
+  # 故在此显式禁用，命令安全过滤以 command_guard 为准（见下）。
   tool_guard:
-    enabled: true
+    enabled: false
     mode: "blocklist"
     tools:
       - "Bash:rm -rf *"
+
+  # 命令内容级安全守卫：生产环境必须开启，防止危险命令执行
+  command_guard:
+    enabled: true
+    mode: "blocklist"           # allowlist | blocklist
+    rules:
+      - "rm -rf /"              # 拦截删根目录
+      - "rm -rf ~"              # 拦截删 home
+      - "rm -rf /*"             # 拦截删根目录通配
+      - "*|*bash*"              # 拦截管道执行 shell
+      - "*|*sh*"                # 拦截管道执行 sh
+      - "*/dev/tcp/*"           # 拦截 Bash 反弹 shell
+      - "Invoke-Expression*"    # 拦截 PowerShell 远程执行
+      - "certutil*"             # 拦截 Windows 下载
+      - "curl *|*"              # 拦截 curl 管道 (curl 下载可以，管道不行)
 
 mcp_servers: []
 

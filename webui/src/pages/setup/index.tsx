@@ -28,6 +28,7 @@ export const SetupPage = ({ onComplete, className }: Props) => {
 		const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
 		return `${protocol}//${window.location.host}/ws/chat`;
 	});
+	const [apiKey, setApiKey] = useState(() => localStorage.getItem('api_key') ?? '');
 	const [checking, setChecking] = useState(false);
 	const [errorMsg, setErrorMsg] = useState('');
 
@@ -51,6 +52,13 @@ export const SetupPage = ({ onComplete, className }: Props) => {
 			// 保存配置
 			localStorage.setItem('user_id', trimmedUser);
 			localStorage.setItem('ws_address', trimmedWs);
+			// API Key 可选：为空时清除，确保后续请求不附带无效头
+			const trimmedKey = apiKey.trim();
+			if (trimmedKey) {
+				localStorage.setItem('api_key', trimmedKey);
+			} else {
+				localStorage.removeItem('api_key');
+			}
 			onComplete();
 		} catch (err) {
 			if (err instanceof Error) {
@@ -102,6 +110,23 @@ export const SetupPage = ({ onComplete, className }: Props) => {
 									/>
 									<FieldDescription>
 										留空使用默认地址
+									</FieldDescription>
+								</Field>
+								<Field>
+									<FieldLabel htmlFor="api-key-input">
+										API Key（可选）
+									</FieldLabel>
+									<Input
+										id="api-key-input"
+										type="password"
+										placeholder="仅在服务端开启 AUTH_REQUIRED 时填写"
+										value={apiKey}
+										onChange={(e) => setApiKey(e.target.value)}
+										autoComplete="off"
+									/>
+									<FieldDescription>
+										留空则不发送；开启服务端 AUTH_REQUIRED 后用于鉴权：
+										REST 请求携带 X-API-Key 头，WebSocket 连接后发送首个 auth 帧
 									</FieldDescription>
 								</Field>
 								{errorMsg && (

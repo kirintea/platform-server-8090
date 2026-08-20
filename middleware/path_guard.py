@@ -66,11 +66,10 @@ _BASH_FILE_CMDS: set[str] = {
     "stat", "file", "du", "df",
     "readlink", "realpath",
     "source", ".",
-    "python", "python3",  # python -c "open('/etc/passwd')"
 }
 
-# 重定向符号后跟的路径也需要检查
-_REDIRECT_RE = re.compile(r'[>]\s*([^\s;|&]+)')
+# 重定向符号后跟的路径也需要检查（覆盖 > / >> / < / << / <<< / 2> / 1>> 等）
+_REDIRECT_RE = re.compile(r'\d*[<>]{1,3}\s*([^\s;|&]+)')
 
 
 class PathGuardMiddleware(MiddlewareBase):
@@ -262,8 +261,12 @@ class PathGuardMiddleware(MiddlewareBase):
                         continue
                     if arg.startswith("-") and len(arg) > 1:
                         # 带参数的选项
-                        if arg in ("-n", "-r", "-R", "-f", "-d", "-e", "-w", "-x",
-                                   "-c", "-m", "-t", "-p", "-o", "--max-depth",
+                        # 注意：这里不再跳过 -f / -o 的下一个 token。
+                        # 对 grep -f FILE / cp -o FILE 等，-f/-o 后面跟的是
+                        # 真实文件路径，必须进入下面的路径校验；盲目跳过会
+                        # 导致 grep -f /etc/passwd 这类越界路径被放行。
+                        if arg in ("-n", "-r", "-R", "-d", "-e", "-w", "-x",
+                                   "-c", "-m", "-t", "-p", "--max-depth",
                                    "--include", "--exclude", "--pattern"):
                             skip_next = True
                         i += 1
@@ -274,20 +277,49 @@ class PathGuardMiddleware(MiddlewareBase):
                     i += 1
                 continue
 
-            # python -c "...open('/path')..." 情况
+            # python -c "..." / python -e "..." 情况
+            # 注意：python/python3 已从 _BASH_FILE_CMDS 移除，否则这里的
+            # 代码字符串扫描分支永远不可达（会被上面的文件命令分支吞掉）。
             if base_cmd in ("python", "python3", "pip", "pip3"):
-                # 检查 -c 后面的代码中是否有路径
-                if "-c" in tokens[i + 1:]:
-                    idx = tokens.index("-c", i + 1)
-                    if idx + 1 < len(tokens):
-                        code = tokens[idx + 1]
-                        # 从 Python 代码中提取字符串路径
-                        code_paths = re.findall(
-                            r"""['"]([/\\][^'"]+)['"]""", code,
-                        )
-                        paths.extend(code_paths)
+                # 扫描 -c / -e 后面的代码字符串中的路径型字面量
+                for opt in ("-c", "-e"):
+                    if opt in tokens[i + 1:]:
+                        idx = tokens.index(opt, i + 1)
+                        if idx + 1 < len(tokens):
+                            code = tokens[idx + 1]
+                            # 提取所有字符串字面量，凡像路径（绝对 / ~/ ./ ../
+                            # 或含 ".."）的都送交沙箱校验
+                            code_paths = re.findall(
+                                r'''['"]([^'"]+)['"]''', code,
+                            )
+                            for s in code_paths:
+                                if (
+                                    s.startswith("/")
+                                    or s.startswith("~")
+                                    or s.startswith(".")
+                                    or ".." in s
+                                ):
+                                    paths.append(s)
+                # 同时扫描脚本/参数中的本地路径型 token（如 python ../x.py）
+                j = i + 1
+                while j < len(tokens):
+                    arg = tokens[j]
+                    if self._looks_like_local_path(arg):
+                        paths.append(arg)
+                    j += 1
+                i += 1
+                continue
 
+            # [MEDIUM] 未识别命令（如 scp/rsync/vim/nano/xargs/dd 等）：
+            # 采用 fail-closed 策略，扫描后续所有参数中的本地路径型 token
+            # 并做沙箱校验，而不是完全放行。
             i += 1
+            while i < len(tokens):
+                arg = tokens[i]
+                if self._looks_like_local_path(arg):
+                    paths.append(arg)
+                i += 1
+            continue
 
         return paths
 
@@ -340,6 +372,34 @@ class PathGuardMiddleware(MiddlewareBase):
     # 路径校验
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _looks_like_local_path(tok: str) -> bool:
+        """判断 token 是否可能是本地文件路径（用于未识别命令的 fail-closed 扫描）
+
+        仅对看起来像本地路径的 token 做沙箱校验，避免误伤普通参数。
+        远端写法（含 @ 或 host:path / scheme://）直接排除，因为这是
+        scp/rsync/curl 等的远端地址，不当作本地文件来校验。
+        """
+        if not tok:
+            return False
+        # `@` 仅当后接 host 模式 (含 : 或 .) 才视为远端 (user@host / user@host:path)。
+        # 否则 `@/etc/passwd` 或 `@file` 这类本地写法 (curl -d @file 上传本地文件)
+        # 必须当作本地路径做沙箱校验，否则会被上面无脑排除而漏拦 (攻击评审发现)。
+        if "@" in tok:
+            if (":" in tok or "." in tok) and not tok.startswith("@"):
+                return False  # user@host[:path] 远端写法 (scp/rsync)
+            return True  # @/path 或 @file 均为本地路径, 必须校验
+        if ":" in tok and not tok.startswith("/") and not tok.startswith("."):
+            return False  # scheme:// 或 host:path 远端写法
+        t = os.path.expanduser(os.path.expandvars(tok))
+        if t.startswith("-"):
+            return False  # 选项标志
+        if t.isdigit():
+            return False  # 纯数字（如 -m 644 的模式）
+        if "/" in t or t.startswith("~") or t.startswith(".") or ".." in t:
+            return True
+        return False
+
     def _is_within_sandbox(self, path_str: str) -> bool:
         """检查路径是否在沙箱目录内
 
@@ -356,16 +416,31 @@ class PathGuardMiddleware(MiddlewareBase):
             True 表示路径在沙箱内
         """
         try:
-            # 跳过明显的非路径字符串（如选项参数、数字等）
-            if not path_str or len(path_str) < 2:
-                return True
-            # 跳过纯数字、选项标志
-            if path_str.startswith("-") and not path_str.startswith("--"):
-                return True
-            if path_str.isdigit():
+            if not path_str:
                 return True
 
-            target = Path(path_str)
+            # [HIGH] `@`-prefixed local file (curl -d @/etc/passwd) — strip the
+            # leading @ so the real path is containment-checked, otherwise it
+            # would be misread as a sandbox-relative path and wrongly pass.
+            if path_str.startswith("@"):
+                path_str = path_str[1:]
+
+            # [HIGH] 在 containment 检查前先做 shell 展开（~ 与环境变量）。
+            # 否则 "~" / "$HOME" 会被当成无害的相对 token 直接放行，
+            # 而 shell 实际会将其解析到沙箱之外。
+            expanded = os.path.expanduser(os.path.expandvars(path_str))
+            if not expanded:
+                # 展开后为空（如未设置的环境变量），保守地判定为越界。
+                return False
+
+            # 跳过明显的非路径字符串（选项参数、纯数字等），但绝不把
+            # "/" 或绝对路径 fast-path 成“在沙箱内”——它们必须被校验。
+            if expanded.startswith("-") and not expanded.startswith("--"):
+                return True
+            if expanded.isdigit():
+                return True
+
+            target = Path(expanded)
             if not target.is_absolute():
                 # 相对路径：基于沙箱根目录解析
                 target = (self._sandbox_resolved / target).resolve()

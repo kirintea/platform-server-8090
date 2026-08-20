@@ -186,6 +186,56 @@ DDL_STATEMENTS = [
     """,
 
     # ============================================================
+    # Agent / Message 持久化表（storage.py 的 Agent/Message CRUD 使用）
+    # 列定义与 core/storage_models.py 的 AgentRecord / MessageRecord 对齐，
+    # 并匹配 storage.py 中 upsert_agent / upsert_message 的 INSERT 列顺序。
+    # ============================================================
+
+    # Agent 记录表
+    # 列: id(VARCHAR(32) PK, 对应 AgentRecord._generate_id 的 16 位 hex)
+    #     user_id / source / data(JSONB, 存 AgentData) / created_at / updated_at
+    # upsert_agent 使用 ON CONFLICT (id) 更新，故 id 为主键。
+    """
+    CREATE TABLE IF NOT EXISTS agents (
+        id          VARCHAR(32) PRIMARY KEY,
+        user_id     VARCHAR(64) NOT NULL,
+        source      VARCHAR(16) NOT NULL DEFAULT 'user',
+        data        JSONB NOT NULL,
+        created_at  TIMESTAMPTZ DEFAULT NOW(),
+        updated_at  TIMESTAMPTZ DEFAULT NOW()
+    )
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_agents_user
+    ON agents(user_id)
+    """,
+
+    # Message 记录表
+    # 列: id(BIGSERIAL PK, 对应 _row_to_message 中 str(row["id"]))
+    #     user_id / session_id / msg_id / role / content / metadata(JSONB) / created_at
+    # upsert_message 通过「同 session 末条 msg_id 相同则更新」逻辑去重，不依赖唯一约束。
+    """
+    CREATE TABLE IF NOT EXISTS messages (
+        id          BIGSERIAL PRIMARY KEY,
+        user_id     VARCHAR(64) NOT NULL,
+        session_id  VARCHAR(64) NOT NULL,
+        msg_id      VARCHAR(64) NOT NULL,
+        role        VARCHAR(16) NOT NULL,
+        content     TEXT NOT NULL,
+        metadata    JSONB DEFAULT NULL,
+        created_at  TIMESTAMPTZ DEFAULT NOW()
+    )
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_messages_user_session
+    ON messages(user_id, session_id)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_messages_user_session_msg
+    ON messages(user_id, session_id, msg_id)
+    """,
+
+    # ============================================================
     # 会话分支血缘（Fork 特性）
     # ============================================================
 

@@ -18,13 +18,42 @@ import asyncio
 import json
 from typing import Any
 
-from agentscope.app.message_bus import MessageBus
+from agentscope.app.message_bus import MessageBus, MessageBusKeys
 from agentscope.event import EventType
 from agentscope.message import Msg, UserMsg
 
 from core.session import SessionManager
 
 from loguru import logger
+
+
+# ------------------------------------------------------------------
+# 共享会话级运行锁（跨传输 / 跨实例互斥）
+# ------------------------------------------------------------------
+# 与 /chat/stream、/ws/chat 共用同一把 per-(user, session) 锁，确保同一
+# 会话的并发 turn 被串行化，避免三个传输各自为政导致的状态竞态。
+SESSION_RUN_TTL_SECS = getattr(MessageBusKeys, "SESSION_RUN_TTL_SECS", 600)
+
+
+def session_lock_key(user_id: str, session_id: str) -> str:
+    """生成统一的 per-(user, session) 运行锁 key。
+
+    三个传输（/chat/stream、/ws/chat、/chat/）都通过此函数取同一把锁，
+    避免“同一会话、不同传输”并发执行导致 AgentState 互相覆盖。
+    """
+    return f"session_lock:{user_id}:{session_id}"
+
+
+def acquire_session_lock(bus, user_id: str, session_id: str):
+    """返回一个 async context manager，获取该会话的运行锁。
+
+    bus 既可为 InMemoryMessageBus（进程内 asyncio.Lock）也可为
+    RedisMessageBus（分布式锁），让锁在多实例部署下同样生效。
+    """
+    return bus.acquire_lock(
+        session_lock_key(user_id, session_id),
+        ttl_secs=SESSION_RUN_TTL_SECS,
+    )
 
 
 class ChatService:
@@ -48,27 +77,35 @@ class ChatService:
         user_id: str,
         session_id: str,
         message: str,
+        db=None,
     ) -> None:
         """触发一次 chat run（后台执行）
 
         获取或创建会话 Agent，执行 reply_stream，
         将每个事件发布到 message_bus 的 session events channel。
 
+        与 /chat/stream、/ws/chat 共用同一把 per-(user, session) 运行锁，
+        确保同一会话的并发 turn 被串行化（跨传输、跨实例）。
+
         Args:
             user_id: 用户 ID
             session_id: 会话 ID
             message: 用户消息
+            db: 可选 DatabaseManager，用于 PG 双写；不传则仅写 Redis
         """
-        from agentscope.app.message_bus import MessageBusKeys
-
         events_key = MessageBusKeys.session_events(session_id)
-        lock_key = MessageBusKeys.session_lock(session_id)
 
-        # 获取 session lock（确保同一 session 不会并发执行）
-        async with self._bus.acquire_lock(
-            lock_key,
-            ttl_secs=MessageBusKeys.SESSION_RUN_TTL_SECS,
-        ):
+        # 工具调用缓冲区（与 chat.py / ws_chat.py 保持一致的事件形状）
+        pending_tool_calls: dict[str, dict] = {}
+        pending_tool_results: dict[str, str] = {}
+        tool_call_records: dict[str, dict] = {}
+
+        # 累积完整回复内容，用于 PG 双写
+        full_reply = ""
+        full_thinking = ""
+
+        # 获取 session lock（确保同一会话不会并发执行，且跨传输共享）
+        async with acquire_session_lock(self._bus, user_id, session_id):
             try:
                 # 获取或创建 Agent
                 agent = await self._session_mgr.get_or_create(user_id, session_id)
@@ -95,36 +132,86 @@ class ChatService:
                             await self._publish_event(events_key, {
                                 "type": "reply_end",
                                 "text": event.get_text_content(),
-                                "msg_id": getattr(event, "id", ""),
+                                "finished": True,
                             })
                         continue
 
                     match event.type:
                         case EventType.TEXT_BLOCK_DELTA:
+                            full_reply += event.delta
                             await self._publish_event(events_key, {
                                 "type": "text_delta",
                                 "delta": event.delta,
                             })
 
                         case EventType.THINKING_BLOCK_DELTA:
+                            full_thinking += event.delta
                             await self._publish_event(events_key, {
                                 "type": "thinking_delta",
                                 "delta": event.delta,
                             })
 
                         case EventType.TOOL_CALL_START:
-                            await self._publish_event(events_key, {
-                                "type": "tool_call",
-                                "tool_name": getattr(event, "tool_call_name", ""),
-                                "tool_call_id": getattr(event, "tool_call_id", ""),
-                            })
+                            tool_call_id = getattr(event, "tool_call_id", "")
+                            tool_name = getattr(event, "tool_call_name", "")
+                            pending_tool_calls[tool_call_id] = {
+                                "name": tool_name,
+                                "args_buffer": "",
+                            }
+
+                        case EventType.TOOL_CALL_DELTA:
+                            tool_call_id = getattr(event, "tool_call_id", "")
+                            delta = getattr(event, "delta", "")
+                            if tool_call_id in pending_tool_calls:
+                                pending_tool_calls[tool_call_id]["args_buffer"] += delta
+
+                        case EventType.TOOL_CALL_END:
+                            tool_call_id = getattr(event, "tool_call_id", "")
+                            if tool_call_id in pending_tool_calls:
+                                tool_info = pending_tool_calls.pop(tool_call_id)
+                                # 尝试解析参数 JSON
+                                args = None
+                                if tool_info["args_buffer"]:
+                                    try:
+                                        args = json.loads(tool_info["args_buffer"])
+                                    except (json.JSONDecodeError, TypeError):
+                                        args = tool_info["args_buffer"]
+                                await self._publish_event(events_key, {
+                                    "type": "tool_call",
+                                    "tool_name": tool_info["name"],
+                                    "tool_call_id": tool_call_id,
+                                    "tool_args": args,
+                                })
+                                tool_call_records[tool_call_id] = {
+                                    "tool_name": tool_info["name"],
+                                    "tool_call_id": tool_call_id,
+                                    "tool_args": args,
+                                }
+
+                        case EventType.TOOL_RESULT_START:
+                            tool_call_id = getattr(event, "tool_call_id", "")
+                            pending_tool_results[tool_call_id] = ""
+
+                        case EventType.TOOL_RESULT_TEXT_DELTA:
+                            tool_call_id = getattr(event, "tool_call_id", "")
+                            delta = getattr(event, "delta", "")
+                            if tool_call_id in pending_tool_results:
+                                pending_tool_results[tool_call_id] += delta
 
                         case EventType.TOOL_RESULT_END:
+                            tool_call_id = getattr(event, "tool_call_id", "")
+                            result_text = pending_tool_results.pop(tool_call_id, "")
+                            state = str(getattr(event, "state", ""))
                             await self._publish_event(events_key, {
                                 "type": "tool_result",
-                                "tool_call_id": getattr(event, "tool_call_id", ""),
-                                "state": str(getattr(event, "state", "")),
+                                "tool_call_id": tool_call_id,
+                                "state": state,
+                                "result": result_text,
                             })
+                            # 将 result 回填到工具调用记录
+                            if tool_call_id in tool_call_records:
+                                tool_call_records[tool_call_id]["result"] = result_text
+                                tool_call_records[tool_call_id]["state"] = state
 
                         case EventType.REPLY_END:
                             await self._publish_event(events_key, {
@@ -132,14 +219,16 @@ class ChatService:
                                 "finished_reason": str(
                                     getattr(event, "finished_reason", "")
                                 ),
+                                "finished": True,
                             })
 
                         case _:
                             pass
 
-                # 持久化会话状态
-                await self._session_mgr.save(user_id, session_id)
-
+            except asyncio.CancelledError:
+                # 取消时也要持久化已产生的部分（在 finally 中处理），
+                # 因此这里仅 re-raise，不要吞掉取消信号。
+                raise
             except Exception as e:
                 logger.exception("Chat run 异常: user={} session={}", user_id, session_id)
                 await self._publish_event(events_key, {
@@ -147,6 +236,36 @@ class ChatService:
                     "message": str(e),
                 })
             finally:
+                # 无论成功 / 异常 / 取消，都持久化 Redis 状态
+                # （含 tool-only / 部分回复，agent state 已被回复过程改变）
+                await self._session_mgr.save(user_id, session_id)
+
+                # PG 双写（镜像 _persist_conversation）：user 消息始终写入，
+                # assistant 消息仅在 full_reply 非空时写入；标题按需 upsert。
+                if db and getattr(db, "is_initialized", False):
+                    try:
+                        await db.insert_conversation(user_id, session_id, "user", message)
+                        metadata = {}
+                        if full_thinking:
+                            metadata["thinking"] = full_thinking
+                        if tool_call_records:
+                            metadata["tool_calls"] = list(tool_call_records.values())
+                        if full_reply:
+                            await db.insert_conversation(
+                                user_id, session_id, "assistant", full_reply,
+                                metadata=metadata or None,
+                            )
+                        title = message[:30] if message else None
+                        if title:
+                            existing = await db.get_session_title(user_id, session_id)
+                            if not existing:
+                                await db.upsert_session_title(user_id, session_id, title)
+                    except Exception:
+                        logger.exception(
+                            "Chat run PG 持久化失败: user={} session={}",
+                            user_id, session_id,
+                        )
+
                 # 发布 run_end 事件
                 await self._publish_event(events_key, {
                     "type": "run_end",
