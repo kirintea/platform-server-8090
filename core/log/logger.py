@@ -21,6 +21,7 @@ _NOISE_LOG_LIBS = (
     "openai", "httpcore", "httpx",
     "redis.asyncio", "asyncio",
     "uvicorn", "urllib3",
+    "opentelemetry",  # OTel async generator 上下文清理噪声（task.cancel 时 detach token 报错）
 )
 
 # ============================================================

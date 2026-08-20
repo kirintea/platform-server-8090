@@ -352,6 +352,15 @@ class DatabaseManager:
     # 便捷方法
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _sanitize_text(text: str) -> str:
+        """移除 PostgreSQL 无法存储的字符（NUL 等）
+
+        PostgreSQL text 类型不允许 \\u0000 (NUL)，会抛出
+        UntranslatableCharacterError。此方法在写入前剥离这些字符。
+        """
+        return text.replace("\x00", "") if text else text
+
     async def insert_conversation(
         self,
         user_id: str,
@@ -373,6 +382,13 @@ class DatabaseManager:
             插入记录的 ID
         """
         import json
+
+        # 剥离 NUL 字符，避免 asyncpg.exceptions.UntranslatableCharacterError
+        content = self._sanitize_text(content)
+        if metadata is not None:
+            metadata_str = json.dumps(metadata, ensure_ascii=False)
+            metadata_str = self._sanitize_text(metadata_str)
+            metadata = json.loads(metadata_str)
 
         sql = """
             INSERT INTO conversations (user_id, session_id, role, content, metadata)

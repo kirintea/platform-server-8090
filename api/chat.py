@@ -230,6 +230,11 @@ async def chat_stream(request: Request, body: ChatRequest):
                     case _:
                         pass
 
+        except GeneratorExit:
+            # 客户端断开连接时生成器被关闭，OTel tracing middleware
+            # 的上下文清理可能抛出 "token was created in a different Context"，
+            # 这是已知的 OTel + async generator 问题，不影响功能。
+            logger.debug("SSE 生成器关闭: user={} session={}", body.user_id, session_id)
         except Exception as e:
             logger.exception("流式回复异常")
             yield _sse_event("error", {"message": str(e)})

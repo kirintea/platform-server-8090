@@ -59,6 +59,8 @@ def create_app(config) -> FastAPI:
     async def lifespan(app: FastAPI):
         """服务启动 / 关闭时的资源管理"""
         # --- 启动 ---
+        app.state.config = config
+
         # 创建数据库管理器（PostgreSQL 连接池 + 自动建表）
         db_mgr = DatabaseManager(config.database)
         await db_mgr.initialize()
