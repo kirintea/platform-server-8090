@@ -45,11 +45,30 @@ class RedisMessageBus(MessageBus):
         decode_responses=True 让所有返回值自动 decode 为 str，
         保证 registry_get/getall 等方法的 ``str`` / ``dict[str, str]``
         类型契约（否则默认返回 bytes）。
+
+        连接保护：from_url 设置 socket_connect_timeout / socket_timeout /
+        health_check_interval，ping() 再用 asyncio.wait_for(timeout=5) 包裹，
+        避免 Redis 不可达 / 黑洞时启动崩溃或无限挂起（DoS）。
         """
         self._redis = aioredis.from_url(
-            self._redis_url, decode_responses=True,
+            self._redis_url,
+            decode_responses=True,
+            socket_connect_timeout=5,
+            socket_timeout=5,
+            health_check_interval=30,
         )
-        await self._redis.ping()
+        try:
+            await asyncio.wait_for(self._redis.ping(), timeout=5)
+        except asyncio.TimeoutError as exc:
+            # 探活超时：清理已建立的连接，避免泄漏半个连接池
+            try:
+                await self._redis.aclose()
+            except Exception:
+                pass
+            self._redis = None
+            raise RuntimeError(
+                f"Redis 连接探活超时 (5s): {self._redis_url}"
+            ) from exc
 
     # --------------------------------------------------------------
     # Mode E — distributed lock (SET NX EX + token verify)

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 # ============================================================
@@ -45,6 +45,8 @@ class ServerConfig(BaseModel):
 
 class ToolGuardConfig(BaseModel):
     """工具黑白名单配置"""
+    model_config = ConfigDict(extra="forbid")
+
     enabled: bool = Field(default=False, description="是否启用工具守卫")
     mode: str = Field(default="blocklist", description="模式: allowlist / blocklist")
     tools: list[str] = Field(default_factory=list, description="工具列表 (支持通配符, 如 'Bash:*')")
@@ -52,6 +54,8 @@ class ToolGuardConfig(BaseModel):
 
 class CommandGuardConfig(BaseModel):
     """命令内容安全守卫配置"""
+    model_config = ConfigDict(extra="forbid")
+
     enabled: bool = Field(default=False, description="是否启用命令守卫")
     mode: str = Field(default="blocklist", description="模式: allowlist / blocklist")
     rules: list[str] = Field(default_factory=list, description="命令匹配规则 (fnmatch 通配符)")
@@ -93,6 +97,8 @@ class InjectionConfigSchema(BaseModel):
 
 class AgentConfig(BaseModel):
     """Agent 行为配置"""
+    model_config = ConfigDict(extra="forbid")
+
     name: str = Field(default="platform_agent", description="Agent 名称")
     system_prompt: str = Field(default="你是一个有帮助的助手。", description="系统提示词")
     max_iters: int = Field(default=20, description="ReAct 最大迭代次数")
@@ -179,6 +185,8 @@ class MiddlewareConfig(BaseModel):
 
 class AppConfig(BaseModel):
     """应用根配置"""
+    model_config = ConfigDict(extra="forbid")
+
     otel: OTelConfig
     llm: LLMConfig
     server: ServerConfig = Field(default_factory=ServerConfig)

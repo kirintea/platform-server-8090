@@ -17,6 +17,7 @@ from fastapi import APIRouter, HTTPException, Request, status
 from pydantic import BaseModel, Field
 
 from core.storage_models import AgentData, AgentRecord
+from core.validators import coerce_id
 
 from loguru import logger
 
@@ -97,6 +98,7 @@ def _agent_to_response(record: AgentRecord) -> AgentResponse:
 @router.get("", response_model=ListAgentsResponse)
 async def list_agents(request: Request, user_id: str = "anonymous"):
     """列出用户的所有 Agent"""
+    user_id = coerce_id(user_id)
     storage = request.app.state.storage
     agents = await storage.list_agents(user_id)
     return ListAgentsResponse(
@@ -116,6 +118,7 @@ async def create_agent(
     user_id: str = "anonymous",
 ):
     """创建新 Agent"""
+    user_id = coerce_id(user_id)
     storage = request.app.state.storage
 
     record = AgentRecord(
@@ -145,6 +148,7 @@ async def get_agent(
     user_id: str = "anonymous",
 ):
     """获取单个 Agent"""
+    user_id = coerce_id(user_id)
     storage = request.app.state.storage
     record = await storage.get_agent(user_id, agent_id)
     if not record:
@@ -163,6 +167,7 @@ async def update_agent(
     user_id: str = "anonymous",
 ):
     """更新 Agent（PATCH 语义）"""
+    user_id = coerce_id(user_id)
     storage = request.app.state.storage
     existing = await storage.get_agent(user_id, agent_id)
     if not existing:
@@ -196,6 +201,7 @@ async def delete_agent(
     user_id: str = "anonymous",
 ):
     """删除 Agent"""
+    user_id = coerce_id(user_id)
     storage = request.app.state.storage
     deleted = await storage.delete_agent(user_id, agent_id)
     if not deleted:

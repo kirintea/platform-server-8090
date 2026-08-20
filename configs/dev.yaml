@@ -84,7 +84,7 @@ agent:
     tools: []
 
   command_guard:
-    enabled: false
+    enabled: true
     mode: "blocklist"           # allowlist | blocklist
     rules:
       - "rm -rf /"              # 拦截删根目录
@@ -109,11 +109,14 @@ mcp_servers: []
   #   args: ["-y", "@modelcontextprotocol/server-filesystem", "/workspace"]
 
 database:
+  # 注意：以下为本地开发默认凭据，仅用于 localhost。
+  # 真实部署（尤其是生产环境）必须显式设置 DATABASE_URL 环境变量，
+  # 切勿使用默认账号/密码直连数据库。
   url: "${DATABASE_URL:-postgresql://user:password@localhost:5432/ragdb}"
   pool_size: 10
 
 redis:
-  url: "${REDIS_URL:-redis://localhost:6390/0}"
+  url: "${REDIS_URL:-redis://localhost:6379/0}"
   key_prefix: "agentscope:session:"
   session_ttl: 1800
 

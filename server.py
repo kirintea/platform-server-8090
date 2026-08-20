@@ -13,9 +13,12 @@
 
 from __future__ import annotations
 
+import asyncio
+import json
 import os
 import threading
 import webbrowser
+from pathlib import Path
 
 from loguru import logger
 
@@ -42,6 +45,87 @@ from core.storage import PostgresStorage
 from core.workspace import LocalWorkspaceManager
 
 
+# ------------------------------------------------------------
+# 轻量级中间件（纯 ASGI 实现，不缓冲响应体，SSE / WebSocket 不受影响）
+# ------------------------------------------------------------
+def _security_headers_middleware(app):
+    """始终开启的安全响应头（对开发 / 生产均无害）"""
+    _SEC_HEADERS = {
+        b"strict-transport-security": b"max-age=31536000; includeSubDomains",
+        b"content-security-policy": b"default-src 'self'",
+        b"x-content-type-options": b"nosniff",
+        b"referrer-policy": b"no-referrer",
+    }
+
+    async def middleware(scope, receive, send):
+        if scope["type"] != "http":
+            await app(scope, receive, send)
+            return
+
+        sent_start = False
+
+        async def send_wrapper(message):
+            nonlocal sent_start
+            if message["type"] == "http.response.start" and not sent_start:
+                sent_start = True
+                headers = list(message.get("headers", []))
+                existing = {k.lower(): v for k, v in headers}
+                for key, val in _SEC_HEADERS.items():
+                    if key not in existing:
+                        headers.append((key, val))
+                message["headers"] = headers
+            await send(message)
+
+        await app(scope, receive, send_wrapper)
+
+    return middleware
+
+
+def _api_key_auth_middleware(app):
+    """全局 API-Key 鉴权（默认关闭，仅 AUTH_REQUIRED=true 时生效）
+
+    放行路径：/webui、/webui/、/health、/docs、/openapi.json、/redoc
+    以及所有以 /webui/ 开头的路径。其余路径需携带正确的 X-API-Key 请求头。
+    """
+    _PUBLIC_EXACT = {
+        "/webui", "/webui/", "/health", "/docs",
+        "/openapi.json", "/redoc",
+    }
+
+    async def middleware(scope, receive, send):
+        if scope["type"] != "http":
+            await app(scope, receive, send)
+            return
+        # 默认关闭：未开启 AUTH_REQUIRED 时直接放行，开发环境不受影响
+        if os.environ.get("AUTH_REQUIRED", "false").lower() != "true":
+            await app(scope, receive, send)
+            return
+
+        path = scope.get("path", "")
+        if path in _PUBLIC_EXACT or path.startswith("/webui/"):
+            await app(scope, receive, send)
+            return
+
+        headers = {k.lower(): v for k, v in scope.get("headers", [])}
+        provided = headers.get(b"x-api-key", b"").decode("latin-1")
+        expected = os.environ.get("API_KEY", "")
+        if expected and provided == expected:
+            await app(scope, receive, send)
+            return
+
+        body = json.dumps(
+            {"error": "Unauthorized", "hint": "Missing or invalid X-API-Key"}
+        ).encode("utf-8")
+        await send({
+            "type": "http.response.start",
+            "status": 401,
+            "headers": [(b"content-type", b"application/json")],
+        })
+        await send({"type": "http.response.body", "body": body})
+
+    return middleware
+
+
 def create_app(config) -> FastAPI:
     """创建 FastAPI 应用实例
 
@@ -64,29 +148,60 @@ def create_app(config) -> FastAPI:
         await db_mgr.initialize()
         app.state.database_manager = db_mgr
 
+        # 应用配置对象（供 /context 等端点读取 request.app.state.config）
+        app.state.config = config
+
         # 创建 PostgreSQL 存储层（Agent/Session/MCP/Skill/Message/Schedule CRUD）
         storage = PostgresStorage(db_mgr)
         app.state.storage = storage
         logger.info("PostgreSQL 存储层已就绪")
 
         # 创建消息总线（Redis 分布式实现，支持多实例无状态部署）
+        # 注意：RedisMessageBus 构造函数当前仅接受 redis_url（见 core/redis_message_bus.py:36），
+        # key_prefix / session_ttl 由 SessionManager 使用，此处无需传递。
+        # Redis 不可达时退避重试；仍失败则降级为 None，应用继续启动（/health 仍可用）。
         message_bus = RedisMessageBus(config.redis.url)
-        await message_bus.initialize()
-        app.state.message_bus = message_bus
-        logger.info("消息总线已就绪 (RedisMessageBus: {})", config.redis.url)
+        _bus_ok = False
+        for _attempt in range(3):
+            try:
+                await message_bus.initialize()
+                _bus_ok = True
+                break
+            except Exception as _bus_err:  # noqa: BLE001
+                if _attempt < 2:
+                    logger.warning(
+                        "Redis 消息总线初始化失败（第 {} 次），2s 后重试: {}",
+                        _attempt + 1, _bus_err,
+                    )
+                    await asyncio.sleep(2)
+                else:
+                    logger.warning(
+                        "Redis 消息总线不可用，应用降级运行"
+                        "（/health 仍可用，对话/会话的 Redis 依赖将不可用）: {}",
+                        _bus_err,
+                    )
+        app.state.message_bus = message_bus if _bus_ok else None
+        if _bus_ok:
+            logger.info("消息总线已就绪 (RedisMessageBus: {})", config.redis.url)
 
         # 创建会话管理器（Agent 实例按需创建）
         session_mgr = SessionManager(
             config=config,
             session_ttl=config.redis.session_ttl,
-            max_sessions=100,
+            max_sessions=getattr(config.server, "max_sessions", 100),
             storage=storage,
             db=db_mgr,
         )
-        # 初始化 Redis 连接
-        await session_mgr.initialize()
+        # 初始化 Redis 连接（与消息总线一致：失败降级而非硬崩溃，app 仍服务 /health）
+        try:
+            await session_mgr.initialize()
+            logger.info("会话管理器已就绪 (Redis: {})", config.redis.url)
+        except Exception as _sess_err:  # noqa: BLE001
+            logger.warning(
+                "SessionManager Redis 初始化失败，降级运行（会话持久化不可用）: {}",
+                _sess_err,
+            )
         app.state.session_manager = session_mgr
-        logger.info("会话管理器已就绪 (Redis: {})", config.redis.url)
 
         # 创建工作区管理器（沙箱根目录，启动时自动创建）
         sandbox_dir = os.path.abspath(config.agent.sandbox_dir)
@@ -108,6 +223,28 @@ def create_app(config) -> FastAPI:
         yield
 
         # --- 关闭 ---
+        # 先排空后台持久化任务（DRAIN：await gather / 取消），避免关闭时丢失在途对话写入。
+        # shutdown_persist_tasks 由 api/chat.py / api/ws_chat.py 提供（同步或异步版本皆可，
+        # 用 iscoroutinefunction 兼容；未定义时跳过，不影响关闭流程）。
+        try:
+            from api.chat import shutdown_persist_tasks as _chat_shutdown  # type: ignore
+        except Exception:  # noqa: BLE001
+            _chat_shutdown = None
+        try:
+            from api.ws_chat import shutdown_persist_tasks as _ws_shutdown  # type: ignore
+        except Exception:  # noqa: BLE001
+            _ws_shutdown = None
+        for _fn in (_chat_shutdown, _ws_shutdown):
+            if _fn is None:
+                continue
+            try:
+                if asyncio.iscoroutinefunction(_fn):
+                    await _fn()
+                else:
+                    _fn()
+            except Exception as _persist_err:  # noqa: BLE001
+                logger.warning("关闭时排空持久化任务失败（已忽略）: {}", _persist_err)
+
         await session_mgr.shutdown()
         logger.info("会话管理器已关闭")
 
@@ -132,8 +269,12 @@ def create_app(config) -> FastAPI:
         lifespan=lifespan,
     )
 
+    # 仓库根目录（server.py 位于仓库根，故 parents[0] 即根目录）
+    # 以绝对路径替代 os.getcwd()，避免进程 cwd 变化时静态 / webui 路径错位。
+    _repo_root = str(Path(__file__).resolve().parents[0])
+
     # 静态文件（前端界面）
-    _static_dir = os.path.join(os.getcwd(), "api", "static")
+    _static_dir = os.path.join(_repo_root, "api", "static")
 
     @app.get("/")
     async def serve_frontend():
@@ -147,12 +288,18 @@ def create_app(config) -> FastAPI:
     @app.get("/webui/{path:path}")
     async def serve_webui(path: str = ""):
         """新版 WebUI 入口"""
-        webui_dir = os.path.join(os.getcwd(), "webui", "dist")
+        webui_dir = os.path.join(_repo_root, "webui", "dist")
         if not os.path.isdir(webui_dir):
             return {"error": "WebUI not built", "hint": "cd webui && npm run build"}
+        # 目标文件：默认 index.html，否则拼接 path
         file_path = os.path.join(webui_dir, path) if path else os.path.join(webui_dir, "index.html")
-        if os.path.exists(file_path) and os.path.isfile(file_path):
-            return FileResponse(file_path)
+        # 路径穿越防护：解析真实路径并校验仍位于 webui_dir 之内
+        real_root = os.path.realpath(webui_dir)
+        real_file = os.path.realpath(file_path)
+        if not real_file.startswith(real_root + os.sep):
+            return {"error": "Forbidden path", "path": path}
+        if os.path.exists(real_file) and os.path.isfile(real_file):
+            return FileResponse(real_file)
         # SPA fallback: 非文件路径都返回 index.html
         return FileResponse(os.path.join(webui_dir, "index.html"))
 
@@ -171,5 +318,12 @@ def create_app(config) -> FastAPI:
 
     # 静态文件服务（CSS/JS 等）
     app.mount("/static", StaticFiles(directory=_static_dir), name="static")
+
+    # ------------------------------------------------------------
+    # 中间件（纯 ASGI 包裹，置于最终返回前）
+    # 顺序：API-Key 鉴权在内，安全响应头在外（对所有响应生效，含 401）
+    # ------------------------------------------------------------
+    app = _api_key_auth_middleware(app)
+    app = _security_headers_middleware(app)
 
     return app

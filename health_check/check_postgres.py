@@ -28,7 +28,14 @@ async def check_pg_connection(db_url: str, report: CheckReport):
 
 async def check_pg_tables(conn, report: CheckReport):
     """检查核心表是否存在"""
-    expected_tables = ["users", "conversations", "sessions", "agents", "mcps", "skills", "schedules", "messages"]
+    # 必须与 core/database.py 的 DDL_STATEMENTS 完全一致（共 7 张表：
+    # conversations / sessions / mcps / skills / schedules / agents / messages）。
+    # 注意：不存在 users 表，故不列入。表缺失时本检查必须 FAIL（红），
+    # 以真实反映 storage 依赖（core/storage.py 读写 agents / messages）。
+    expected_tables = [
+        "conversations", "sessions", "mcps", "skills", "schedules",
+        "agents", "messages",
+    ]
     try:
         rows = await conn.fetch(
             "SELECT table_name FROM information_schema.tables WHERE table_schema = 'public'"

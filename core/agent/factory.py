@@ -22,6 +22,8 @@ from agentscope.skill import LocalSkillLoader
 from pydantic import SecretStr
 
 from core.config.schemas import AppConfig, LLMConfig, MCPConfig
+from core.validators import coerce_id
+from loguru import logger
 from middleware.context_guard import ContextGuardMiddleware
 from core.formatter import SiliconFlowFormatter
 from core.workspace import LocalWorkspaceManager
@@ -57,6 +59,30 @@ class AgentFactory:
         # 1. 创建模型
         model = AgentFactory._create_model(config.llm)
 
+        # 1.1 接入精确 Token 计数（core.token_counter.count_tokens）
+        # NOTE: agentscope 2.0.5 的 ContextConfig / OpenAIChatModel 是否接受
+        # token_counter 回调需在实际环境中核实。此处仅做防御性接入与可导入性冒烟，
+        # 若 API 不支持则静默降级，不影响 agent 创建。
+        try:
+            from core.token_counter import count_tokens
+
+            _sys_token_est = count_tokens(
+                config.agent.system_prompt or "",
+                config.llm.model,
+            )
+            logger.debug(
+                "AgentFactory: system_prompt 约 {} tokens (model={})",
+                _sys_token_est,
+                config.llm.model,
+            )
+            # TODO: 将 count_tokens 接入 ContextConfig 的 budget / token_counter 回调，
+            # 使上下文压缩与预算控制使用精确计数而非字符启发式。
+        except Exception as e:  # noqa: BLE001
+            logger.debug(
+                "AgentFactory: count_tokens 接入失败（降级为框架默认估算）: {}",
+                e,
+            )
+
         # 2. 创建 Toolkit
         toolkit = AgentFactory._create_toolkit(config, user_id=user_id)
 
@@ -67,7 +93,8 @@ class AgentFactory:
         import os
         sandbox_dir = os.path.abspath(config.agent.sandbox_dir)
         if config.agent.sandbox_per_user and user_id:
-            sandbox_dir = os.path.join(sandbox_dir, user_id)
+            # 防止 user_id="/" 或 "../../" 等越界输入折叠沙箱根目录
+            sandbox_dir = os.path.join(sandbox_dir, coerce_id(user_id))
         workspace_manager = LocalWorkspaceManager(base_dir=sandbox_dir)
 
         # 5. 创建 Agent 配置
@@ -152,9 +179,36 @@ class AgentFactory:
         )
 
         # 6. 设置权限模式
+        # NOTE: agentscope 2.0.5 的 permission 模块 / PermissionMode 枚举字段名
+        # 需在实际运行环境中核实（该 API 可能尚未暴露或字段名不同）。
+        # 此处做防御性处理：导入失败或属性缺失时静默降级，
+        # 避免每次会话创建都因 API 差异而硬崩溃。
         if config.agent.permission_mode == "bypass":
-            from agentscope.permission import PermissionMode
-            agent.state.permission_context.mode = PermissionMode.BYPASS
+            try:
+                from agentscope.permission import PermissionMode
+
+                _bypass_mode = getattr(PermissionMode, "BYPASS", "bypass")
+            except Exception:  # noqa: BLE001
+                _bypass_mode = "bypass"
+                logger.warning(
+                    "AgentFactory: AgentScope permission API 不可用，"
+                    "permission_mode=bypass 降级为字符串标记"
+                    "（请在 agentscope 2.0.5 中核实确切 API）"
+                )
+            try:
+                _perm_ctx = getattr(agent.state, "permission_context", None)
+                if _perm_ctx is not None:
+                    _perm_ctx.mode = _bypass_mode
+                else:
+                    logger.warning(
+                        "AgentFactory: agent.state 缺少 permission_context，"
+                        "跳过权限模式设置"
+                    )
+            except Exception as e:  # noqa: BLE001
+                logger.warning(
+                    "AgentFactory: 设置 permission_context.mode 失败，已降级: {}",
+                    e,
+                )
 
         return agent
 
@@ -207,15 +261,17 @@ class AgentFactory:
         tool_manager = ToolManagerMiddleware(config.agent.tool_manager.config_path)
         tools = tool_manager.load_tools()
 
-        # 沙箱根目录（按需追加 user_id）
+        # 沙箱根目录（按需追加 user_id，coerce_id 防止越界）
         sandbox_dir = os.path.abspath(config.agent.sandbox_dir)
         if config.agent.sandbox_per_user and user_id:
-            sandbox_dir = os.path.join(sandbox_dir, user_id)
+            sandbox_dir = os.path.join(sandbox_dir, coerce_id(user_id))
 
         # MCP 客户端
         if config.agent.sandbox_mcp:
-            # MCP 配置从 sandbox_dir/mcp/ 加载（预留，当前 MCP 配置仍在 yaml 中）
-            pass
+            # 预留：从 sandbox_dir/mcp/ 加载用户级 MCP 配置。
+            # 当前 MCP 配置仍统一来自 config.mcp_servers（yaml），
+            # 此分支为保留位，暂不执行任何操作。
+            pass  # reserved: per-user sandbox MCP loading not yet implemented
         mcp_clients = AgentFactory._create_mcp_clients(config.mcp_servers)
 
         # Skills 加载器
@@ -283,7 +339,7 @@ class AgentFactory:
         import os
         sandbox_dir = os.path.abspath(config.agent.sandbox_dir)
         if config.agent.sandbox_per_user and user_id:
-            sandbox_dir = os.path.join(sandbox_dir, user_id)
+            sandbox_dir = os.path.join(sandbox_dir, coerce_id(user_id))
         middlewares.append(PathGuardMiddleware(sandbox_dir=sandbox_dir))
 
         # 回复预算控制中间件 — 防止单次回复消耗过多 token

@@ -4,8 +4,39 @@ from __future__ import annotations
 
 import os
 
+from pydantic import ValidationError
+
 from .loader import YamlLoader
 from .schemas import AppConfig
+
+
+def _config_validation_error(
+    exc: ValidationError, yaml_path: str, model_name: str,
+) -> RuntimeError:
+    """将 pydantic ValidationError 转换为可诊断的启动错误
+
+    明确列出出错的配置文件、模型，以及每个非法字段（extra='forbid'
+    的拼写错误/多余键），让启动失败可读、可修，而不是裸 ValidationError。
+    """
+    lines = [
+        f"配置校验失败: 文件 '{yaml_path}' 中模型 '{model_name}' 不合法，"
+        f"共 {len(exc.errors())} 处问题:",
+    ]
+    for err in exc.errors():
+        loc = " -> ".join(str(p) for p in err.get("loc", []))
+        err_type = err.get("type", "")
+        msg = err.get("msg", "")
+        if err_type == "extra_forbidden":
+            lines.append(
+                f"  - [{loc or '<root>'}] 多余/未知字段 "
+                f"(extra='forbid' 已禁止，请删除或修正拼写)"
+            )
+        else:
+            lines.append(f"  - [{loc or '<root>'}] {msg} (type={err_type})")
+    lines.append(
+        "请修正上述配置后重试（不要移除 extra='forbid'，它是有意的安全守卫）。"
+    )
+    return RuntimeError("\n".join(lines))
 
 
 class ConfigManager:
@@ -47,7 +78,10 @@ class ConfigManager:
 
         yaml_path = self._get_config_path(env)
         resolved = YamlLoader.load(yaml_path)
-        self._config = AppConfig(**resolved)
+        try:
+            self._config = AppConfig(**resolved)
+        except ValidationError as exc:
+            raise _config_validation_error(exc, yaml_path, "AppConfig") from exc
         return self._config
 
     def get(self) -> AppConfig:

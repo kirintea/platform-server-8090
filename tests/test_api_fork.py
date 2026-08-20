@@ -90,6 +90,6 @@ def test_fork_endpoint_creates_branch(client):
     assert child_in_list.get("parent_session_id") == sid
     assert child_in_list.get("depth") is not None and child_in_list.get("depth") >= 1
 
-    # 5. 清理
-    client.delete(f"/sessions/{UID}/{child_sid}")
-    client.delete(f"/sessions/{UID}/{sid}")
+    # 5. 清理（删除路由为 POST /sessions/{user_id}/{session_id}/delete）
+    client.post(f"/sessions/{UID}/{child_sid}/delete")
+    client.post(f"/sessions/{UID}/{sid}/delete")

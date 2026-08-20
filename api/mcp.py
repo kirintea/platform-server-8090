@@ -15,6 +15,7 @@ from fastapi import APIRouter, HTTPException, Request, status
 from pydantic import BaseModel, Field
 
 from core.storage_models import MCPRecord
+from core.validators import coerce_id
 
 from loguru import logger
 
@@ -97,6 +98,7 @@ def _mcp_to_response(record: MCPRecord) -> MCPResponse:
 @router.get("", response_model=ListMCPsResponse)
 async def list_mcps(request: Request, user_id: str = "anonymous"):
     """列出已安装 MCP"""
+    user_id = coerce_id(user_id)
     storage = request.app.state.storage
     mcps = await storage.list_mcps(user_id)
     return ListMCPsResponse(
@@ -116,6 +118,7 @@ async def create_mcp(
     user_id: str = "anonymous",
 ):
     """添加 MCP"""
+    user_id = coerce_id(user_id)
     storage = request.app.state.storage
 
     # 检查名称唯一性
@@ -151,6 +154,7 @@ async def update_mcp(
     user_id: str = "anonymous",
 ):
     """更新 MCP"""
+    user_id = coerce_id(user_id)
     storage = request.app.state.storage
     existing = await storage.get_mcp(user_id, mcp_id)
     if not existing:
@@ -181,6 +185,7 @@ async def delete_mcp(
     user_id: str = "anonymous",
 ):
     """删除 MCP"""
+    user_id = coerce_id(user_id)
     storage = request.app.state.storage
     deleted = await storage.delete_mcp(user_id, mcp_id)
     if not deleted:

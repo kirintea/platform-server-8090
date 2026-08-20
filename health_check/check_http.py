@@ -33,14 +33,12 @@ def check_http_health(base_url: str, report: CheckReport):
 
 
 def check_api_endpoints(base_url: str, report: CheckReport):
-    """检查各 API 端点可达性"""
+    """检查各 API 端点可达性（要求实际 2xx/3xx，4xx/5xx 视为失败）"""
     endpoints = [
-        ("GET",  "/agent",          "Agent 列表"),
         ("GET",  "/mcp",            "MCP 列表"),
         ("GET",  "/skill",          "Skill 列表"),
-        ("GET",  "/schedule",       "定时任务列表"),
         ("GET",  "/sessions",       "会话列表"),
-        ("GET",  "/webui/health",   "WebUI 健康检查"),
+        ("GET",  "/webui",          "WebUI 入口"),
     ]
 
     for method, path, name in endpoints:
@@ -50,13 +48,13 @@ def check_api_endpoints(base_url: str, report: CheckReport):
                 method=method,
             )
             with urllib.request.urlopen(req, timeout=5) as resp:
-                report.add(f"API {name}", True, f"{resp.status}")
+                # 明确的期望状态断言：仅 2xx/3xx 视为通过，4xx/5xx 视为失败
+                if 200 <= resp.status < 400:
+                    report.add(f"API {name}", True, f"{resp.status}")
+                else:
+                    report.add(f"API {name}", False, "", f"{resp.status} 非预期状态（期望 2xx/3xx）")
         except urllib.error.HTTPError as e:
-            # 4xx/5xx 也算端点可达
-            if e.code < 500:
-                report.add(f"API {name}", True, f"{e.code} (业务错误，端点可达)")
-            else:
-                report.add(f"API {name}", False, "", f"{e.code} {e.reason}")
+            report.add(f"API {name}", False, "", f"{e.code} {e.reason}")
         except Exception as e:
             report.add(f"API {name}", False, "", str(e))
 

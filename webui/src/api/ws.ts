@@ -27,7 +27,13 @@ class WsManager {
 
 	/** 获取已保存的 WebSocket 基础地址 */
 	getWsBaseUrl(): string {
-		return localStorage.getItem('ws_address') || '';
+		const saved = localStorage.getItem('ws_address');
+		if (saved && saved.trim()) {
+			return saved.trim().replace(/\/+$/, '');
+		}
+		// 未配置时使用当前页面 host 推导默认地址，避免静默失败
+		const protocol = location.protocol === 'https:' ? 'wss' : 'ws';
+		return `${protocol}://${location.host}/ws/chat`;
 	}
 
 	/** 获取已保存的用户 ID */
@@ -52,17 +58,15 @@ class WsManager {
 		this._cleanup();
 
 		const baseAddr = this.getWsBaseUrl();
-		if (!baseAddr) {
-			console.error('未配置 WebSocket 地址');
-			this.options.onError?.(new Event('error'));
-			return;
-		}
 
 		const { userId, sessionId } = this.options;
 		let url = `${baseAddr}?user_id=${encodeURIComponent(userId)}`;
 		if (sessionId) {
 			url += `&session_id=${encodeURIComponent(sessionId)}`;
 		}
+
+		// 注意：API-Key 不放入 URL（浏览器 WS 无法自定义请求头，且 query 参数会
+		// 泄露到代理 / 访问日志）。鉴权改为连接建立后发送首个 auth 帧（见 onopen）。
 
 		try {
 			this.ws = new WebSocket(url);
@@ -74,6 +78,16 @@ class WsManager {
 
 		this.ws.onopen = () => {
 			this.reconnectAttempts = 0;
+			// 鉴权优先：在心跳与 onOpen 回调之前发送 auth 帧，确保其为连接后第一条消息。
+			// 服务端（api/ws_chat.py）通过首个 { type: "auth", payload: { api_key } }
+			// 帧完成鉴权；未配置 api_key 时不发送，兼容未开启 AUTH_REQUIRED 的服务端。
+			const apiKey = localStorage.getItem('api_key');
+			if (apiKey && apiKey.trim()) {
+				this.ws?.send(JSON.stringify({
+					type: 'auth',
+					payload: { api_key: apiKey.trim() },
+				}));
+			}
 			this._startHeartbeat();
 			this.options?.onOpen?.();
 		};

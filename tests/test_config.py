@@ -76,7 +76,17 @@ class TestEnvVarResolver:
         result = EnvVarResolver.resolve({"k": "${MISSING_VAR:-fallback}"})
         assert result["k"] == "fallback"
 
-    def test_missing_keeps_placeholder(self):
+    def test_missing_raises_fail_fast(self):
+        # 未解析且无 :-default 的占位符现在会 fail-fast（安全修复），
+        # 避免运行时才暴露无效密钥（如 LLM 返回 401）。
+        import pytest
+
+        with pytest.raises(RuntimeError):
+            EnvVarResolver.resolve({"k": "${TOTALLY_MISSING}"})
+
+    def test_missing_keeps_placeholder_when_overridden(self, monkeypatch):
+        # ALLOW_UNRESOLVED_ENV=1 可降级为旧行为（保留占位符 + 告警）。
+        monkeypatch.setenv("ALLOW_UNRESOLVED_ENV", "1")
         result = EnvVarResolver.resolve({"k": "${TOTALLY_MISSING}"})
         assert result["k"] == "${TOTALLY_MISSING}"
 

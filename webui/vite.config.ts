@@ -6,6 +6,8 @@ import { defineConfig } from 'vite';
 
 export default defineConfig({
 	plugins: [react(), tailwindcss()],
+	// base must stay '/webui/' so the SPA is served under the server's /webui route.
+	// Entry point is `index.html` -> `src/main.tsx` (do not rename without updating index.html).
 	base: '/webui/',
 	server: {
 		port: 5173,
