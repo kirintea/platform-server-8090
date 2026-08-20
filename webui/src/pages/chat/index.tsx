@@ -12,11 +12,12 @@ import {
 	Plus,
 	Trash2,
 } from 'lucide-react';
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 
 import { wsManager } from '@/api/ws';
 import { ChatInput } from '@/components/chat/ChatInput';
+import { ContextIndicator } from '@/components/chat/ContextIndicator';
 import { MessageBubble } from '@/components/chat/MessageBubble';
 import { Button } from '@/components/ui/button';
 import {
@@ -62,6 +63,7 @@ export function ChatPage() {
 		refresh: refreshSessions,
 		renameSession,
 		deleteSession,
+		forkSession,
 	} = useSessions(userId);
 
 	const {
@@ -105,6 +107,16 @@ export function ChatPage() {
 		}
 		setDeleteTarget(null);
 	};
+
+	// Fork 会话
+	const handleFork = useCallback(async () => {
+		if (!urlSessionId) return;
+		const newSessionId = await forkSession(urlSessionId);
+		if (newSessionId) {
+			navigate(`/chat/${newSessionId}`);
+			refreshSessions();
+		}
+	}, [urlSessionId, forkSession, navigate, refreshSessions]);
 
 	// 当前会话标题
 	const currentTitle = urlSessionId
@@ -246,7 +258,15 @@ export function ChatPage() {
 							) : (
 								<div className="max-w-3xl mx-auto">
 									{messages.map((msg) => (
-										<MessageBubble key={msg.id} message={msg} />
+										<MessageBubble
+											key={msg.id}
+											message={msg}
+											onFork={
+												urlSessionId && msg.role === 'assistant'
+													? handleFork
+													: undefined
+											}
+										/>
 									))}
 									{phase === 'streaming' && (
 										<div className="flex gap-1 py-2">
@@ -259,7 +279,8 @@ export function ChatPage() {
 							)}
 						</div>
 
-						{/* Input */}
+						{/* Context indicator + Input */}
+						<ContextIndicator userId={userId} sessionId={urlSessionId ?? null} />
 						<ChatInput
 							phase={phase}
 							onSend={sendMessage}

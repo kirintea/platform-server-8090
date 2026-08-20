@@ -2,7 +2,7 @@
 # 通过 APP_ENV=dev 加载 (默认)
 
 otel:
-  enabled: false
+  enabled: true
   endpoint: "${OTEL_ENDPOINT:-http://localhost:4317}"
   service_name: "platform-agent"
   service_version: "0.1.0"
@@ -54,12 +54,28 @@ agent:
     - 长时间运行的命令注意超时
     - 遇到不确定的操作，向用户确认
   max_iters: 50
-  context_trigger_ratio: 0.8
-  context_reserve_ratio: 0.1
+  # trigger_ratio: 压缩触发阈值，默认 0.6（~76K tokens 时触发）。
+  # 生产环境可调至 0.5 进一步提前触发，减少单次请求 token 消耗。
+  context_trigger_ratio: 0.6
+  # reserve_ratio: 压缩后保留近期上下文比例，0.15 保留 ~19K tokens
+  context_reserve_ratio: 0.15
+  # tool_result_limit: 单条工具结果 token 上限，50000→15000 防止单次工具调用占满上下文
+  tool_result_limit: 15000
+  # reply_token_budget: 单次回复加权 token 预算，超限自动收尾
+  reply_token_budget: 80000
+  # 运行时注入配置
+  injection:
+    timezone: "Asia/Shanghai"
+    time_interval: 0.5                    # 每 30 分钟刷新时间
+    context_buffer_ratio: 0.15            # 压缩阈值前 15% 开始预警
+    emit_hint_event: true                 # 前端可渲染注入内容
+    extra_fields:
+      platform: "AgentScope Platform Server"
+
   permission_mode: "bypass"
   # 沙箱配置（三个均启用时：workspaces/{user_id}/ + 独立 skills/ + 独立 mcp/）
   sandbox_dir: "workspaces"
-  sandbox_skills: false      # true 时 skills 从 sandbox_dir/skills/ 加载
+  sandbox_skills: true      # true 时 skills 从 sandbox_dir/skills/ 加载
   sandbox_mcp: false         # true 时 MCP 配置从 sandbox_dir/mcp/ 加载
   sandbox_per_user: true    # true 时沙箱路径追加 user_id 层级（workspaces/{user_id}/）
   tool_guard:
@@ -100,3 +116,16 @@ redis:
   url: "${REDIS_URL:-redis://localhost:6390/0}"
   key_prefix: "agentscope:session:"
   session_ttl: 1800
+
+# 上下文回填配置（PG → Redis 恢复时使用）
+context:
+  backfill_message_limit: 20        # 50 → 20，减少回填消息数
+  backfill_token_budget: 15000      # 回填 token 上限
+
+# 中间件配置
+middleware:
+  budget_control:
+    enabled: true
+    token_budget: 80000             # 单次回复加权 token 预算
+    input_weight: 1
+    output_weight: 2                # 输出 token 成本更高

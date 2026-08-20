@@ -7,6 +7,8 @@
 import { Loader2, Send, Square } from 'lucide-react';
 import { useCallback, useRef, useState } from 'react';
 
+const MIN_SEND_INTERVAL_MS = 2000;
+
 import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
 
@@ -23,10 +25,15 @@ interface Props {
 export function ChatInput({ phase, disabled, onSend, onInterrupt, className }: Props) {
 	const [input, setInput] = useState('');
 	const textareaRef = useRef<HTMLTextAreaElement>(null);
+	const lastSendTimeRef = useRef<number>(0);
 
 	const handleSend = useCallback(() => {
 		const content = input.trim();
 		if (!content || phase !== 'idle') return;
+		// 发送节流：2 秒内禁止连续发送，防止高频请求耗尽上下文配额
+		const now = Date.now();
+		if (now - lastSendTimeRef.current < MIN_SEND_INTERVAL_MS) return;
+		lastSendTimeRef.current = now;
 		onSend(content);
 		setInput('');
 		// Reset textarea height

@@ -35,6 +35,7 @@ _tmp_*
 example
 docker_images
 docs
+skills
 
 # WebUI 前端
 webui/node_modules/

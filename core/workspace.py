@@ -12,9 +12,11 @@
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 
 from loguru import logger
@@ -177,3 +179,78 @@ class LocalWorkspaceManager:
     def _get_workdir(self, user_id: str, session_id: str) -> str:
         """获取工作区目录路径"""
         return os.path.join(self._base_dir, user_id, session_id)
+
+    # ------------------------------------------------------------------
+    # Offloader 协议实现 — 上下文卸载
+    # ------------------------------------------------------------------
+
+    async def offload_context(
+        self,
+        session_id: str,
+        msgs: list,
+        **kwargs,
+    ) -> str:
+        """持久化被压缩的消息到 JSONL 文件（Offloader 协议）
+
+        压缩时由 AgentScope 框架自动调用，将被移除的消息写入文件。
+        Agent 后续可通过 Read/Grep 工具回查被卸载的内容。
+
+        Args:
+            session_id: 会话 ID
+            msgs: 被压缩移除的消息列表
+
+        Returns:
+            写入的文件路径
+        """
+        session_dir = Path(self._base_dir) / "sessions" / session_id
+        session_dir.mkdir(parents=True, exist_ok=True)
+
+        filepath = session_dir / "context.jsonl"
+        with open(filepath, "a", encoding="utf-8") as f:
+            for msg in msgs:
+                content = getattr(msg, "content", [])
+                record = {
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "role": getattr(msg, "role", "unknown"),
+                    "name": getattr(msg, "name", ""),
+                    "content": [
+                        block.model_dump() if hasattr(block, "model_dump")
+                        else {"type": "text", "text": str(block)}
+                        for block in (content if isinstance(content, list) else [content])
+                    ],
+                }
+                f.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+        logger.info("Offloaded {} messages to {}", len(msgs), filepath)
+        return str(filepath)
+
+    async def offload_tool_result(
+        self,
+        session_id: str,
+        tool_result,
+        **kwargs,
+    ) -> str:
+        """持久化被截断的工具结果到独立文件（Offloader 协议）
+
+        截断时由 AgentScope 框架自动调用，保留完整工具结果。
+        截断标记会包含文件路径提示，Agent 可按需读取完整内容。
+
+        Args:
+            session_id: 会话 ID
+            tool_result: 被截断的工具结果
+
+        Returns:
+            写入的文件路径
+        """
+        session_dir = Path(self._base_dir) / "sessions" / session_id
+        session_dir.mkdir(parents=True, exist_ok=True)
+
+        tool_id = getattr(tool_result, "id", "unknown")
+        filepath = session_dir / f"tool_result-{tool_id}.txt"
+        content = getattr(tool_result, "content", "")
+        if not isinstance(content, str):
+            content = str(content)
+        filepath.write_text(content, encoding="utf-8")
+
+        logger.info("Offloaded tool result {} to {}", tool_id, filepath)
+        return str(filepath)

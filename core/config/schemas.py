@@ -82,13 +82,28 @@ class ToolManagerConfig(BaseModel):
     )
 
 
+class InjectionConfigSchema(BaseModel):
+    """运行时状态注入配置"""
+    timezone: str = Field(default="Asia/Shanghai", description="时区")
+    time_interval: float = Field(default=0.5, description="时间注入间隔（小时）")
+    context_buffer_ratio: float = Field(default=0.15, description="压缩阈值前预警比例")
+    emit_hint_event: bool = Field(default=True, description="是否推送 HintBlockEvent 到前端")
+    extra_fields: dict[str, str] = Field(default_factory=dict, description="自定义注入字段")
+
+
 class AgentConfig(BaseModel):
     """Agent 行为配置"""
     name: str = Field(default="platform_agent", description="Agent 名称")
     system_prompt: str = Field(default="你是一个有帮助的助手。", description="系统提示词")
     max_iters: int = Field(default=20, description="ReAct 最大迭代次数")
-    context_trigger_ratio: float = Field(default=0.8, description="上下文压缩触发比例")
-    context_reserve_ratio: float = Field(default=0.1, description="压缩后保留比例")
+    context_trigger_ratio: float = Field(default=0.6, description="上下文压缩触发比例")
+    context_reserve_ratio: float = Field(default=0.15, description="压缩后保留比例")
+    tool_result_limit: int = Field(default=15000, description="单条工具结果 token 上限")
+    reply_token_budget: int = Field(default=80000, description="单次回复加权 token 预算")
+    injection: InjectionConfigSchema = Field(
+        default_factory=InjectionConfigSchema,
+        description="运行时注入配置",
+    )
     permission_mode: str = Field(default="bypass", description="权限模式: auto / bypass")
     sandbox_dir: str = Field(
         default="workspaces",
@@ -136,6 +151,28 @@ class RedisConfig(BaseModel):
     session_ttl: int = Field(default=1800, description="会话 TTL (秒)")
 
 
+class ContextBackfillConfig(BaseModel):
+    """PG 回填配置"""
+    backfill_message_limit: int = Field(default=20, description="回填消息条数上限")
+    backfill_token_budget: int = Field(default=15000, description="回填 token 预算")
+
+
+class BudgetControlConfig(BaseModel):
+    """回复预算控制中间件配置"""
+    enabled: bool = Field(default=True, description="是否启用预算控制")
+    token_budget: int = Field(default=80000, description="单次回复加权 token 预算")
+    input_weight: int = Field(default=1, description="输入 token 权重")
+    output_weight: int = Field(default=2, description="输出 token 权重")
+
+
+class MiddlewareConfig(BaseModel):
+    """中间件配置"""
+    budget_control: BudgetControlConfig = Field(
+        default_factory=BudgetControlConfig,
+        description="回复预算控制配置",
+    )
+
+
 # ============================================================
 # 根配置
 # ============================================================
@@ -149,3 +186,11 @@ class AppConfig(BaseModel):
     mcp_servers: list[MCPConfig] = Field(default_factory=list, description="MCP 服务列表")
     database: DatabaseConfig = Field(default_factory=DatabaseConfig)
     redis: RedisConfig = Field(default_factory=RedisConfig)
+    context: ContextBackfillConfig = Field(
+        default_factory=ContextBackfillConfig,
+        description="上下文回填配置",
+    )
+    middleware: MiddlewareConfig = Field(
+        default_factory=MiddlewareConfig,
+        description="中间件配置",
+    )

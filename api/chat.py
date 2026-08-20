@@ -384,13 +384,22 @@ class ForkSessionResponse(BaseModel):
 async def fork_session(request: Request, user_id: str, session_id: str):
     """基于父会话创建分支，返回新会话信息"""
     session_mgr = request.app.state.session_manager
+    logger.info("Fork 请求: user={} session={}", user_id, session_id)
+
+    # 确保父会话在 Redis 中有 state（从内存或 PG 恢复并保存到 Redis）
+    try:
+        await session_mgr.get_or_create(user_id, session_id)
+        logger.info("父会话已加载: user={} session={}", user_id, session_id)
+    except Exception:
+        logger.exception("加载父会话失败: user={} session={}", user_id, session_id)
+
     try:
         child_sid = await session_mgr.fork_session(user_id, session_id)
     except ValueError as e:
-        # 父会话在 Redis 中无 state（不存在或已过期）
+        logger.warning("Fork 失败 (ValueError): {}", e)
         raise HTTPException(status_code=404, detail=str(e))
     except RuntimeError as e:
-        # Redis 未初始化
+        logger.warning("Fork 失败 (RuntimeError): {}", e)
         raise HTTPException(status_code=503, detail=str(e))
 
     # 读取子会话元数据给前端（_load_session_meta 内部已吞异常返回 None）
@@ -419,6 +428,143 @@ class ChatTriggerResponse(BaseModel):
     """Fire-and-Forget 触发响应"""
     status: str = Field(description="状态: started")
     session_id: str = Field(description="会话 ID")
+
+
+@router.get("/sessions/{user_id}/{session_id}/context")
+async def get_session_context(
+    request: Request,
+    user_id: str,
+    session_id: str,
+):
+    """获取会话的上下文用量信息
+
+    返回当前会话的 token 估算、消息数、压缩状态等。
+    用于前端上下文用量指示器。
+    """
+    session_mgr = request.app.state.session_manager
+    config = request.app.state.config
+    session_mgr_list = await session_mgr.list_sessions(user_id)
+
+    # 检查会话是否存在
+    session_exists = any(
+        s["session_id"] == session_id for s in session_mgr_list
+    )
+
+    # 从 Redis 获取状态
+    state = await session_mgr._load_state(user_id, session_id)
+    if state is None:
+        # 尝试从内存获取
+        entry = session_mgr._sessions.get((user_id, session_id))
+        if entry:
+            state = entry.agent.state
+
+    context_size = config.llm.context_size
+    trigger_ratio = config.agent.context_trigger_ratio
+    reserve_ratio = config.agent.context_reserve_ratio
+
+    if state is None:
+        return {
+            "estimated_tokens": 0,
+            "context_window": context_size,
+            "usage_ratio": 0.0,
+            "trigger_ratio": trigger_ratio,
+            "reserve_ratio": reserve_ratio,
+            "status": "healthy",
+            "message_count": 0,
+            "summary_exists": False,
+        }
+
+    # 估算 token 数
+    context = getattr(state, "context", [])
+    total_chars = 0
+    msg_count = len(context)
+    for msg in context:
+        content = getattr(msg, "content", [])
+        if isinstance(content, list):
+            for block in content:
+                text = getattr(block, "text", "")
+                if text:
+                    total_chars += len(text)
+        elif isinstance(content, str):
+            total_chars += len(content)
+
+    # 粗略估算（中文约 1.5 token/字，英文约 0.25 token/word）
+    estimated_tokens = total_chars * 2 // 3  # 中英文混合的折中估算
+    usage_ratio = estimated_tokens / context_size if context_size > 0 else 0.0
+
+    # 状态判断
+    if usage_ratio < 0.35:
+        status = "healthy"
+    elif usage_ratio < 0.45:
+        status = "warning"
+    else:
+        status = "critical"
+
+    # 检查是否有摘要
+    summary_exists = any(
+        getattr(msg, "name", "") == "summary"
+        for msg in context
+    )
+
+    # 检查卸载文件
+    from pathlib import Path
+    offload_dir = Path("workspaces") / "sessions" / session_id
+    offloaded_files = []
+    if offload_dir.is_dir():
+        offloaded_files = [
+            str(f.relative_to(Path("workspaces")))
+            for f in offload_dir.iterdir()
+            if f.is_file()
+        ]
+
+    return {
+        "estimated_tokens": estimated_tokens,
+        "context_window": context_size,
+        "usage_ratio": round(usage_ratio, 3),
+        "trigger_ratio": trigger_ratio,
+        "reserve_ratio": reserve_ratio,
+        "status": status,
+        "message_count": msg_count,
+        "summary_exists": summary_exists,
+        "offloaded_files": offloaded_files,
+    }
+
+
+@router.post("/sessions/{user_id}/{session_id}/compress")
+async def compress_session(
+    request: Request,
+    user_id: str,
+    session_id: str,
+):
+    """手动触发上下文压缩
+
+    调用 Agent 的 compress_context 方法，将历史消息压缩为摘要。
+    压缩前会先通过 Offloader 卸载被移除的内容。
+    """
+    session_mgr = request.app.state.session_manager
+
+    # 确保会话已加载
+    try:
+        agent = await session_mgr.get_or_create(user_id, session_id)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"加载会话失败: {e}")
+
+    try:
+        result = await agent.compress_context()
+        # 保存压缩后的状态
+        await session_mgr.save(user_id, session_id)
+
+        return {
+            "status": "compressed",
+            "user_id": user_id,
+            "session_id": session_id,
+            "messages_compressed": getattr(result, "messages_compressed", 0),
+            "tokens_before": getattr(result, "tokens_before", 0),
+            "tokens_after": getattr(result, "tokens_after", 0),
+        }
+    except Exception as e:
+        logger.exception("手动压缩失败: user={} session={}", user_id, session_id)
+        raise HTTPException(status_code=500, detail=f"压缩失败: {e}")
 
 
 @router.post("/chat/", response_model=ChatTriggerResponse)

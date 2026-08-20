@@ -98,6 +98,7 @@ dependencies = [
     "sortedcontainers==2.4.0",
     "sse-starlette==3.4.8",
     "starlette==1.4.1",
+    "tiktoken>=0.14.0",
     "tqdm==4.70.0",
     "tree-sitter==0.26.0",
     "tree-sitter-bash==0.25.1",

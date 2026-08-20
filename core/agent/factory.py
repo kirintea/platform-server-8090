@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from agentscope.agent import Agent, ContextConfig, InjectionConfig, ReActConfig
 from agentscope.credential import OpenAICredential
-from agentscope.middleware import TracingMiddleware
+from agentscope.middleware import ReplyBudgetControlMiddleware, TracingMiddleware
 from agentscope.model import OpenAIChatModel
 from agentscope.state import AgentState
 from agentscope.tool import Toolkit
@@ -22,7 +22,9 @@ from agentscope.skill import LocalSkillLoader
 from pydantic import SecretStr
 
 from core.config.schemas import AppConfig, LLMConfig, MCPConfig
+from middleware.context_guard import ContextGuardMiddleware
 from core.formatter import SiliconFlowFormatter
+from core.workspace import LocalWorkspaceManager
 from middleware.tool_guard import ToolGuardMiddleware
 from middleware.command_guard import CommandGuardMiddleware
 from middleware.tool_manager import ToolManagerMiddleware
@@ -61,7 +63,14 @@ class AgentFactory:
         # 3. 创建中间件列表
         middlewares = AgentFactory._create_middlewares(config, user_id=user_id)
 
-        # 4. 创建 Agent 配置
+        # 4. 创建工作区管理器（同时作为 Offloader）
+        import os
+        sandbox_dir = os.path.abspath(config.agent.sandbox_dir)
+        if config.agent.sandbox_per_user and user_id:
+            sandbox_dir = os.path.join(sandbox_dir, user_id)
+        workspace_manager = LocalWorkspaceManager(base_dir=sandbox_dir)
+
+        # 5. 创建 Agent 配置
         react_config = ReActConfig(
             max_iters=config.agent.max_iters,
             stop_on_reject=False,
@@ -70,13 +79,65 @@ class AgentFactory:
         context_config = ContextConfig(
             trigger_ratio=config.agent.context_trigger_ratio,
             reserve_ratio=config.agent.context_reserve_ratio,
+            tool_result_limit=config.agent.tool_result_limit,
+            compression_prompt=(
+                "你是一个上下文压缩助手。请将以下对话历史压缩为结构化摘要。\n"
+                "要求：\n"
+                "1. 保留所有文件路径、API 端点、错误信息的完整原文\n"
+                "2. 保留用户明确表达的偏好和约束\n"
+                "3. 保留未完成的任务和下一步计划\n"
+                "4. 使用绝对时间（如 2026-08-20 10:30），不要使用相对时间（如刚才）\n"
+                "5. 使用完整路径（如 /api/sessions/{id}/messages），不要使用相对引用\n"
+            ),
+            summary_schema={
+                "type": "object",
+                "properties": {
+                    "task_overview": {
+                        "type": "string",
+                        "description": "用户的核心需求和成功标准",
+                    },
+                    "current_state": {
+                        "type": "string",
+                        "description": "已完成的工作、修改的文件、关键输出",
+                    },
+                    "important_discoveries": {
+                        "type": "string",
+                        "description": "约束、决策、错误信息、失败的尝试",
+                    },
+                    "next_steps": {
+                        "type": "string",
+                        "description": "具体的待办事项、阻塞项、优先级",
+                    },
+                    "context_to_preserve": {
+                        "type": "string",
+                        "description": "用户偏好、领域细节、做出的承诺",
+                    },
+                    "tool_outputs_summary": {
+                        "type": "string",
+                        "description": "重要工具调用的结果摘要（文件内容、API 响应等）",
+                    },
+                },
+                "required": [
+                    "task_overview",
+                    "current_state",
+                    "important_discoveries",
+                    "next_steps",
+                    "context_to_preserve",
+                    "tool_outputs_summary",
+                ],
+            },
         )
 
+        injection_cfg = config.agent.injection
         injection_config = InjectionConfig(
-            timezone="Asia/Shanghai",
+            timezone=injection_cfg.timezone,
+            time_interval=injection_cfg.time_interval,
+            context_buffer_ratio=injection_cfg.context_buffer_ratio,
+            emit_hint_event=injection_cfg.emit_hint_event,
+            extra_fields=injection_cfg.extra_fields or None,
         )
 
-        # 5. 创建 Agent（传入已有状态用于会话恢复）
+        # 6. 创建 Agent（传入已有状态用于会话恢复，挂载 Offloader）
         agent = Agent(
             name=config.agent.name,
             system_prompt=config.agent.system_prompt,
@@ -86,6 +147,7 @@ class AgentFactory:
             react_config=react_config,
             context_config=context_config,
             injection_config=injection_config,
+            offloader=workspace_manager,
             state=state,
         )
 
@@ -223,5 +285,21 @@ class AgentFactory:
         if config.agent.sandbox_per_user and user_id:
             sandbox_dir = os.path.join(sandbox_dir, user_id)
         middlewares.append(PathGuardMiddleware(sandbox_dir=sandbox_dir))
+
+        # 回复预算控制中间件 — 防止单次回复消耗过多 token
+        budget_cfg = config.middleware.budget_control
+        if budget_cfg.enabled:
+            middlewares.append(ReplyBudgetControlMiddleware(
+                token_budget=budget_cfg.token_budget,
+                input_token_weight=budget_cfg.input_weight,
+                output_token_weight=budget_cfg.output_weight,
+                hint_message=(
+                    "你本次回复的 token 预算即将耗尽。"
+                    "请尽快总结当前进展并给出结论，不要再调用工具。"
+                ),
+            ))
+
+        # 压缩守卫中间件 — 确保内容先卸载再丢弃
+        middlewares.append(ContextGuardMiddleware())
 
         return middlewares

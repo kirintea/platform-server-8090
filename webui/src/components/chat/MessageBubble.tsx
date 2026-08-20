@@ -1,24 +1,34 @@
 /**
  * 消息气泡组件 — 渲染用户/助手消息
  *
- * 支持：Markdown、思考折叠、工具调用展示
+ * 支持：Markdown、思考折叠、工具调用展示、复制、Fork
  */
 
-import { ChevronDown, ChevronRight, Wrench } from 'lucide-react';
-import { useState } from 'react';
+import { Check, ChevronDown, ChevronRight, Copy, GitBranch, Wrench } from 'lucide-react';
+import { useCallback, useState } from 'react';
 
 import type { ChatMessage } from '@/api/types';
 import { cn } from '@/lib/utils';
 
 interface Props {
 	message: ChatMessage;
+	onFork?: () => void;
 }
 
-export function MessageBubble({ message }: Props) {
+export function MessageBubble({ message, onFork }: Props) {
 	const isUser = message.role === 'user';
+	const [copied, setCopied] = useState(false);
+
+	const handleCopy = useCallback(() => {
+		if (!message.content) return;
+		navigator.clipboard.writeText(message.content).then(() => {
+			setCopied(true);
+			setTimeout(() => setCopied(false), 1500);
+		});
+	}, [message.content]);
 
 	return (
-		<div className={cn('flex gap-3 py-3', isUser && 'flex-row-reverse')}>
+		<div className={cn('flex gap-3 py-3 group/msg', isUser && 'flex-row-reverse')}>
 			{/* Avatar */}
 			<div
 				className={cn(
@@ -54,6 +64,30 @@ export function MessageBubble({ message }: Props) {
 						{message.toolCalls.map((tc) => (
 							<ToolCallBlock key={tc.tool_call_id} toolCall={tc} />
 						))}
+					</div>
+				)}
+
+				{/* Action bar — hover 时显示 */}
+				{!isUser && (message.content || message.toolCalls?.length) && (
+					<div className="flex items-center gap-1 mt-1 opacity-0 group-hover/msg:opacity-100 transition-opacity">
+						<button
+							className="flex items-center gap-1 px-2 py-1 text-xs text-muted-foreground hover:text-foreground hover:bg-muted rounded transition-colors"
+							onClick={handleCopy}
+							title="复制"
+						>
+							{copied ? <Check className="size-3 text-green-500" /> : <Copy className="size-3" />}
+							{copied ? '已复制' : '复制'}
+						</button>
+						{onFork && (
+							<button
+								className="flex items-center gap-1 px-2 py-1 text-xs text-muted-foreground hover:text-foreground hover:bg-muted rounded transition-colors"
+								onClick={onFork}
+								title="从此处分叉会话"
+							>
+								<GitBranch className="size-3" />
+								Fork
+							</button>
+						)}
 					</div>
 				)}
 			</div>

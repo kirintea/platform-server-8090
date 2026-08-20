@@ -148,7 +148,10 @@ class SessionManager:
 
             # Redis 未命中时，尝试从 PG 回填历史消息
             if saved_state is None:
-                saved_state = await self._backfill_from_pg(user_id, session_id)
+                saved_state = await self._backfill_from_pg(
+                    user_id, session_id,
+                    limit=self._config.context.backfill_message_limit,
+                )
 
             # 创建 Agent 实例（传入恢复的状态 + user_id 用于沙箱隔离）
             agent = AgentFactory.create(
@@ -160,6 +163,11 @@ class SessionManager:
                 agent=agent,
             )
             self._sessions[key] = entry
+
+            # 从 PG 恢复的状态需同步写入 Redis（否则 fork 等依赖 Redis 的操作会失败）
+            if saved_state is not None:
+                await self._save_state(user_id, session_id, agent)
+
             logger.info(
                 "新建会话: user={} session={} (恢复={}, 当前 {} 个会话)",
                 user_id, session_id,
@@ -640,7 +648,7 @@ class SessionManager:
         self,
         user_id: str,
         session_id: str,
-        limit: int = 50,
+        limit: int = 20,
     ) -> AgentState | None:
         """从 PG 加载历史消息，构造 AgentState 用于恢复上下文
 
@@ -650,7 +658,7 @@ class SessionManager:
         Args:
             user_id: 用户 ID
             session_id: 会话 ID
-            limit: 加载消息条数上限
+            limit: 加载消息条数上限（默认 20，可通过 context.backfill_message_limit 配置）
 
         Returns:
             AgentState 或 None（PG 无数据时）
