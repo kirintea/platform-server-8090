@@ -1,0 +1,80 @@
+# docker-compose.sandbox.yml — 应用 + 沙箱分离部署
+# 沙箱容器只挂载 workspaces/，不暴露项目源码和配置
+#
+# 启动:       docker compose -f docker-compose.sandbox.yml up -d
+# 停止:       docker compose -f docker-compose.sandbox.yml down
+# 进入 app:   docker compose -f docker-compose.sandbox.yml exec app bash
+# 进入沙箱:   docker compose -f docker-compose.sandbox.yml exec sandbox bash
+# 启动服务:   docker compose -f docker-compose.sandbox.yml exec app python main.py
+# 重建镜像:   docker compose -f docker-compose.sandbox.yml build
+
+x-app-image: &app-image
+  build:
+    context: .
+    dockerfile: Dockerfile
+
+x-sandbox-image: &sandbox-image
+  build:
+    context: .
+    dockerfile: Dockerfile.sandbox
+
+services:
+  # ============================================================
+  # 应用服务 — API 服务，拥有完整项目代码
+  # ============================================================
+  app:
+    <<: *app-image
+    container_name: platform-server-8090
+    ports:
+      - "8090:8090"
+    volumes:
+      # 代码外挂 — 完整项目
+      - .:/workspace
+      # 挂载 Docker Socket — 让 app 容器能管理 sandbox 容器
+      - /var/run/docker.sock:/var/run/docker.sock
+    stdin_open: true
+    tty: true
+    environment:
+      - APP_ENV=${APP_ENV:-dev}
+      - REDIS_URL=redis://host.docker.internal:6390/0
+      - DATABASE_URL=postgresql://user:password@host.docker.internal:5432/ragdb
+      - OTEL_ENDPOINT=http://host.docker.internal:4317
+      # 沙箱容器名（DockerSandboxProxy 用此名称连接沙箱）
+      - SANDBOX_CONTAINER=platform-sandbox
+      # 沙箱模式: local（默认，不启用容器沙箱）/ docker（启用）
+      - SANDBOX_BACKEND=${SANDBOX_BACKEND:-local}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      - sandbox
+    restart: unless-stopped
+    networks:
+      - platform-net
+
+  # ============================================================
+  # 沙箱容器 — 只暴露 workspaces/，不可见项目源码和配置
+  # ============================================================
+  sandbox:
+    <<: *sandbox-image
+    container_name: platform-sandbox
+    volumes:
+      # 只挂载沙箱工作目录，不挂载项目代码
+      - sandbox_workspaces:/workspace/workspaces
+    stdin_open: true
+    tty: true
+    environment:
+      - APP_ENV=${APP_ENV:-dev}
+    working_dir: /workspace/workspaces
+    # 保持容器运行
+    command: ["sleep", "infinity"]
+    restart: unless-stopped
+    networks:
+      - platform-net
+
+volumes:
+  sandbox_workspaces:
+    name: platform_sandbox_workspaces
+
+networks:
+  platform-net:
+    driver: bridge

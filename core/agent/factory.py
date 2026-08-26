@@ -31,6 +31,7 @@ from middleware.tool_guard import ToolGuardMiddleware
 from middleware.command_guard import CommandGuardMiddleware
 from middleware.tool_manager import ToolManagerMiddleware
 from middleware.path_guard import PathGuardMiddleware
+from middleware.docker_sandbox_proxy import DockerSandboxProxy
 
 
 class AgentFactory:
@@ -340,6 +341,15 @@ class AgentFactory:
         sandbox_dir = os.path.abspath(config.agent.sandbox_dir)
         if config.agent.sandbox_per_user and user_id:
             sandbox_dir = os.path.join(sandbox_dir, coerce_id(user_id))
+
+        # Docker 沙箱代理（执行环境级）— sandbox.backend="docker" 时启用
+        if config.sandbox.backend == "docker":
+            host_project_root = os.path.abspath(".")
+            middlewares.append(DockerSandboxProxy(
+                sandbox_config=config.sandbox,
+                host_project_root=host_project_root,
+            ))
+
         middlewares.append(PathGuardMiddleware(sandbox_dir=sandbox_dir))
 
         # 回复预算控制中间件 — 防止单次回复消耗过多 token

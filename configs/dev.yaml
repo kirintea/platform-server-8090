@@ -132,3 +132,17 @@ middleware:
     token_budget: 80000             # 单次回复加权 token 预算
     input_weight: 1
     output_weight: 2                # 输出 token 成本更高
+
+# 沙箱配置
+# backend: "local" = 直接本机执行（默认），"docker" = 转发到沙箱容器
+# 设为 "docker" 前需先启动沙箱容器：
+#   docker compose -f docker-compose.sandbox.yml up -d sandbox
+sandbox:
+  # backend: "${SANDBOX_BACKEND:-local}"
+  backend: "docker"
+  container: "platform-sandbox"
+  project_root: "/workspace"
+  extra_mounts:
+    - host: "skills"
+      container: "/workspace/skills"
+      readonly: true

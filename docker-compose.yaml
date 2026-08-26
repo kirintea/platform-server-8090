@@ -1,0 +1,40 @@
+# docker-compose.yaml — 应用服务编排（代码外挂）
+# 数据库（Redis/PostgreSQL）由 docker/deploy_yml/ 独立管理
+#
+# 容器启动:   docker compose up -d
+# 容器停止:   docker compose down
+# 进入容器:   docker compose exec app bash
+# 启动服务:   docker compose exec app python main.py
+# 后台服务:   docker compose exec -d app python main.py
+# 查看日志:   docker compose logs -f app
+# 重建镜像:   docker compose build && docker compose up -d
+
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: platform-server-8090
+    ports:
+      - "8090:8090"
+    volumes:
+      # 代码外挂 — 宿主机项目目录挂载到容器 /workspace
+      - .:/workspace
+    stdin_open: true
+    tty: true
+    environment:
+      - APP_ENV=${APP_ENV:-dev}
+      # 数据库地址指向宿主机（docker/deploy_yml/ 中的服务映射到 localhost）
+      # 这些会覆盖 .env 中的值，因为 main.py 用 load_dotenv(override=False)
+      - REDIS_URL=redis://host.docker.internal:6390/0
+      - DATABASE_URL=postgresql://user:password@host.docker.internal:5432/ragdb
+      - OTEL_ENDPOINT=http://host.docker.internal:4317
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+    networks:
+      - platform-net
+
+networks:
+  platform-net:
+    driver: bridge

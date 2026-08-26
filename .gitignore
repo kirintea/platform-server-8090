@@ -34,7 +34,6 @@ _tmp_*
 .draft
 example
 docker_images
-docs
 skills
 
 # WebUI 前端

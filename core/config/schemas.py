@@ -179,6 +179,33 @@ class MiddlewareConfig(BaseModel):
     )
 
 
+class SandboxMountConfig(BaseModel):
+    """沙箱额外挂载配置"""
+    host: str = Field(description="宿主机路径（相对于项目根）")
+    container: str = Field(description="容器内挂载路径（绝对路径）")
+    readonly: bool = Field(default=True, description="是否只读")
+
+
+class SandboxConfig(BaseModel):
+    """沙箱配置"""
+    backend: str = Field(
+        default="local",
+        description="沙箱后端: local（直接本机执行）/ docker（转发到沙箱容器）",
+    )
+    container: str = Field(
+        default="platform-sandbox",
+        description="沙箱容器名称（backend=docker 时使用）",
+    )
+    project_root: str = Field(
+        default="/workspace",
+        description="容器内项目根路径（挂载点）",
+    )
+    extra_mounts: list[SandboxMountConfig] = Field(
+        default_factory=list,
+        description="额外挂载列表（如 skills/ 目录）",
+    )
+
+
 # ============================================================
 # 根配置
 # ============================================================
@@ -201,4 +228,8 @@ class AppConfig(BaseModel):
     middleware: MiddlewareConfig = Field(
         default_factory=MiddlewareConfig,
         description="中间件配置",
+    )
+    sandbox: SandboxConfig = Field(
+        default_factory=SandboxConfig,
+        description="沙箱配置",
     )

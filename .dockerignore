@@ -1,0 +1,15 @@
+.venv/
+.git/
+__pycache__/
+*.pyc
+logs/
+workspaces/
+docker/
+node_modules/
+webui/node_modules/
+webui/dist/
+.env
+*.egg-info/
+dist/
+build/
+.pytest_cache/

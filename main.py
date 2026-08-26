@@ -30,7 +30,8 @@ import uvicorn
 from dotenv import load_dotenv
 
 # ---------- 加载 .env (必须最先执行) ----------
-load_dotenv(override=True)
+# override=False: 已存在的环境变量（如 Docker 注入）优先于 .env 文件
+load_dotenv(override=False)
 
 from core.config import ConfigManager
 from core.log.logger import setup_logging, flush_log_on_exit

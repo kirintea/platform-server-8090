@@ -255,3 +255,5 @@ database:
 | [docs/sandbox-plan.md](docs/sandbox-plan.md) | 沙箱隔离设计 |
 | [docs/tool-middleware-plan.md](docs/tool-middleware-plan.md) | 工具守卫设计 |
 | [docs/dangerous-commands.md](docs/dangerous-commands.md) | 命令安全守卫说明 |
+| [docs/docker-deployment.md](docs/docker-deployment.md) | Docker 容器化部署指南 |
+| [docs/sandbox-guide.md](docs/sandbox-guide.md) | 沙箱隔离指南 |

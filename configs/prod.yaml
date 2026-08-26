@@ -94,3 +94,13 @@ database:
 
 redis:
   url: "${REDIS_URL:-redis://localhost:6379/0}"
+
+# 沙箱配置
+sandbox:
+  backend: "${SANDBOX_BACKEND:-local}"
+  container: "platform-sandbox"
+  project_root: "/workspace"
+  extra_mounts:
+    - host: "skills"
+      container: "/workspace/skills"
+      readonly: true
