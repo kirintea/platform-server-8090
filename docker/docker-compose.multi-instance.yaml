@@ -1,0 +1,122 @@
+# docker-compose.multi-instance.yaml
+# 多实例部署：N 个 platform-server + Nginx 负载均衡 + Redis + PostgreSQL
+#
+# 启动（默认 2 副本）：
+#   cd docker
+#   docker compose -f docker-compose.multi-instance.yaml up -d
+#
+# 指定副本数：
+#   docker compose -f docker-compose.multi-instance.yaml up -d --scale platform-server=3
+#
+# 停止：
+#   docker compose -f docker-compose.multi-instance.yaml down
+#
+# 查看日志：
+#   docker compose -f docker-compose.multi-instance.yaml logs -f platform-server
+
+services:
+  # ============================================================
+  # Nginx — 反向代理 + 负载均衡
+  # ============================================================
+  nginx:
+    image: nginx:alpine
+    container_name: nginx-gateway
+    ports:
+      - "8090:80"        # 对外暴露 8090，与原有端口一致
+    volumes:
+      - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on:
+      - platform-server
+    restart: unless-stopped
+    networks:
+      - platform-net
+
+  # ============================================================
+  # Platform Server — 可水平扩展
+  # ============================================================
+  platform-server:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    environment:
+      - APP_ENV=${APP_ENV:-dev}
+      - REDIS_URL=redis://redis:6379/0
+      - DATABASE_URL=postgresql://user:password@postgres:5432/ragdb
+      - LLM_API_KEY=${LLM_API_KEY:-}
+      - LLM_BASE_URL=${LLM_BASE_URL:-}
+      - LLM_MODEL_NAME=${LLM_MODEL_NAME:-glm-5}
+      - OTEL_ENDPOINT=${OTEL_ENDPOINT:-http://otel-collector:4317}
+    volumes:
+      # 工作区：所有容器共享宿主机同一目录
+      - ../workspaces:/workspace/workspaces
+      # 配置文件
+      - ../configs:/workspace/configs:ro
+      # 技能目录
+      - ../skills:/workspace/skills:ro
+      # .env 文件（可选）
+      - ../.env:/workspace/.env:ro
+    working_dir: /workspace
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8090/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    restart: unless-stopped
+    networks:
+      - platform-net
+
+  # ============================================================
+  # Redis — 会话状态持久化
+  # ============================================================
+  redis:
+    image: redis:7-alpine
+    container_name: redis-platform
+    volumes:
+      - redis-data:/data
+    command: >
+      redis-server
+      --appendonly yes
+      --maxmemory 256mb
+      --maxmemory-policy allkeys-lru
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 10s
+    restart: unless-stopped
+    networks:
+      - platform-net
+
+  # ============================================================
+  # PostgreSQL — 对话历史持久化
+  # ============================================================
+  postgres:
+    image: bitnami/postgresql:latest
+    container_name: postgres-platform
+    environment:
+      POSTGRESQL_USERNAME: user
+      POSTGRESQL_PASSWORD: password
+      POSTGRESQL_DATABASE: ragdb
+    volumes:
+      - postgres-data:/bitnami/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U user -d ragdb"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 10s
+    restart: unless-stopped
+    networks:
+      - platform-net
+
+volumes:
+  redis-data:
+    name: platform_redis_data
+  postgres-data:
+    name: platform_postgres_data
+
+networks:
+  platform-net:
+    driver: bridge

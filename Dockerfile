@@ -16,9 +16,19 @@ WORKDIR /workspace
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# 代码通过 volume 挂载，这里不 COPY
+# 拷贝应用代码（利用 .dockerignore 排除无关文件）
+COPY main.py server.py ./
+COPY api/ api/
+COPY core/ core/
+COPY middleware/ middleware/
+COPY configs/ configs/
+COPY health_check/ health_check/
+COPY scripts/ scripts/
+
+# workspaces/ 和 skills/ 通过 volume 挂载，不 COPY
 
 EXPOSE 8090
 
-# 保持容器运行，服务启动命令在容器内手动执行
-CMD ["sleep", "infinity"]
+# 默认启动服务（生产模式）
+# 开发模式下 docker-compose 可覆盖为 ["sleep", "infinity"]
+CMD ["python", "main.py"]
