@@ -323,6 +323,21 @@ class AgentFactory:
 
         middlewares.append(PathGuardMiddleware(sandbox_dir=sandbox_dir))
 
+        # 长期记忆中间件 — AgenticMemory（Markdown 文件型，按用户隔离）
+        if config.memory.enabled:
+            from agentscope.middleware import AgenticMemoryMiddleware
+
+            memory_base = os.path.abspath(config.memory.workdir_base)
+            memory_workdir = memory_base
+            if user_id:
+                memory_workdir = os.path.join(memory_base, coerce_id(user_id), "Memory")
+            os.makedirs(memory_workdir, exist_ok=True)
+
+            memory_kwargs: dict = {"workdir": memory_workdir}
+            if config.memory.backend != "local":
+                memory_kwargs["backend"] = config.memory.backend
+            middlewares.append(AgenticMemoryMiddleware(**memory_kwargs))
+
         # 回复预算控制中间件 — 防止单次回复消耗过多 token
         budget_cfg = config.middleware.budget_control
         if budget_cfg.enabled:

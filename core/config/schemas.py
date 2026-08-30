@@ -291,6 +291,14 @@ class SandboxConfig(BaseModel):
 # 根配置
 # ============================================================
 
+class MemoryConfig(BaseModel):
+    """长期记忆配置。"""
+
+    enabled: bool = False
+    backend: str = "local"
+    workdir_base: str = "./workspaces"
+
+
 class AppConfig(BaseModel):
     """应用根配置"""
     model_config = ConfigDict(extra="forbid")
@@ -318,4 +326,8 @@ class AppConfig(BaseModel):
     rag: RAGConfig = Field(
         default_factory=RAGConfig,
         description="RAG 检索增强生成配置（预留）",
+    )
+    memory: MemoryConfig = Field(
+        default_factory=MemoryConfig,
+        description="长期记忆配置",
     )
