@@ -119,6 +119,33 @@ class PermissionConfig(BaseModel):
     )
 
 
+class RAGConfig(BaseModel):
+    """RAG 检索增强生成配置
+
+    当前为空壳预留，RAG 服务确定后填充具体参数。
+    第三方向量存储通过 ThirdPartyVectorStore(VectorStoreBase) 对接。
+    """
+    enabled: bool = Field(default=False, description="是否启用 RAG")
+    backend: str = Field(
+        default="third_party",
+        description="RAG 后端类型: third_party / qdrant / milvus / ...",
+    )
+    api_url: str = Field(default="", description="RAG 服务 API 地址")
+    api_key: str = Field(default="", description="RAG 服务 API 密钥")
+    collection: str = Field(default="default", description="默认 collection 名称")
+    top_k: int = Field(default=5, description="检索返回最大结果数")
+    score_threshold: float | None = Field(default=None, description="相似度阈值")
+    mode: str = Field(
+        default="agentic",
+        description="集成模式: static（自动注入）/ agentic（Agent 自主调用）/ both",
+    )
+    emit_hint_event: bool = Field(default=True, description="static 模式下是否推送 HintBlockEvent")
+    extra_params: dict[str, Any] = Field(
+        default_factory=dict,
+        description="扩展参数（传递给 ThirdPartyVectorStore）",
+    )
+
+
 class AgentConfig(BaseModel):
     """Agent 行为配置"""
     model_config = ConfigDict(extra="forbid")
@@ -287,4 +314,8 @@ class AppConfig(BaseModel):
     sandbox: SandboxConfig = Field(
         default_factory=SandboxConfig,
         description="沙箱配置",
+    )
+    rag: RAGConfig = Field(
+        default_factory=RAGConfig,
+        description="RAG 检索增强生成配置（预留）",
     )
