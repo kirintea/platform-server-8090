@@ -162,7 +162,7 @@ class AgentFactory:
             time_interval=injection_cfg.time_interval,
             context_buffer_ratio=injection_cfg.context_buffer_ratio,
             emit_hint_event=injection_cfg.emit_hint_event,
-            extra_fields=injection_cfg.extra_fields or None,
+            extra_fields=injection_cfg.extra_fields or {},
         )
 
         # 6. 创建 Agent（传入已有状态用于会话恢复，挂载 Offloader）
@@ -179,37 +179,8 @@ class AgentFactory:
             state=state,
         )
 
-        # 6. 设置权限模式
-        # NOTE: agentscope 2.0.5 的 permission 模块 / PermissionMode 枚举字段名
-        # 需在实际运行环境中核实（该 API 可能尚未暴露或字段名不同）。
-        # 此处做防御性处理：导入失败或属性缺失时静默降级，
-        # 避免每次会话创建都因 API 差异而硬崩溃。
-        if config.agent.permission_mode == "bypass":
-            try:
-                from agentscope.permission import PermissionMode
-
-                _bypass_mode = getattr(PermissionMode, "BYPASS", "bypass")
-            except Exception:  # noqa: BLE001
-                _bypass_mode = "bypass"
-                logger.warning(
-                    "AgentFactory: AgentScope permission API 不可用，"
-                    "permission_mode=bypass 降级为字符串标记"
-                    "（请在 agentscope 2.0.5 中核实确切 API）"
-                )
-            try:
-                _perm_ctx = getattr(agent.state, "permission_context", None)
-                if _perm_ctx is not None:
-                    _perm_ctx.mode = _bypass_mode
-                else:
-                    logger.warning(
-                        "AgentFactory: agent.state 缺少 permission_context，"
-                        "跳过权限模式设置"
-                    )
-            except Exception as e:  # noqa: BLE001
-                logger.warning(
-                    "AgentFactory: 设置 permission_context.mode 失败，已降级: {}",
-                    e,
-                )
+        # 7. 设置权限模式 + 细粒度规则
+        AgentFactory._setup_permission(config, agent)
 
         return agent
 
@@ -369,3 +340,75 @@ class AgentFactory:
         middlewares.append(ContextGuardMiddleware())
 
         return middlewares
+
+    @staticmethod
+    def _setup_permission(config: AppConfig, agent: Agent) -> None:
+        """设置权限模式与细粒度规则
+
+        优先使用 config.agent.permission（新字段），
+        向后兼容 config.agent.permission_mode（旧字段）。
+        """
+        from agentscope.permission import (
+            PermissionBehavior,
+            PermissionContext,
+            PermissionMode,
+            PermissionRule,
+        )
+
+        perm_cfg = config.agent.permission
+
+        # 解析权限模式
+        mode_str = perm_cfg.mode or config.agent.permission_mode
+        mode_map = {
+            "default": PermissionMode.DEFAULT,
+            "accept_edits": PermissionMode.ACCEPT_EDITS,
+            "explore": PermissionMode.EXPLORE,
+            "bypass": PermissionMode.BYPASS,
+            "dont_ask": PermissionMode.DONT_ASK,
+        }
+        mode = mode_map.get(mode_str, PermissionMode.BYPASS)
+
+        # 构建拒绝规则
+        deny_rules: dict[str, list[PermissionRule]] = {}
+        for entry in perm_cfg.deny_rules:
+            rule = PermissionRule(
+                tool_name=entry.tool_name,
+                rule_content=entry.rule_content,
+                behavior=PermissionBehavior.DENY,
+                source=entry.source,
+            )
+            deny_rules.setdefault(entry.tool_name, []).append(rule)
+
+        # 构建允许规则
+        allow_rules: dict[str, list[PermissionRule]] = {}
+        for entry in perm_cfg.allow_rules:
+            rule = PermissionRule(
+                tool_name=entry.tool_name,
+                rule_content=entry.rule_content,
+                behavior=PermissionBehavior.ALLOW,
+                source=entry.source,
+            )
+            allow_rules.setdefault(entry.tool_name, []).append(rule)
+
+        # 注入到 agent.state.permission_context
+        perm_ctx = getattr(agent.state, "permission_context", None)
+        if perm_ctx is not None:
+            perm_ctx.mode = mode
+            if deny_rules:
+                for tool_name, rules in deny_rules.items():
+                    existing = perm_ctx.deny_rules.get(tool_name, [])
+                    perm_ctx.deny_rules[tool_name] = existing + rules
+            if allow_rules:
+                for tool_name, rules in allow_rules.items():
+                    existing = perm_ctx.allow_rules.get(tool_name, [])
+                    perm_ctx.allow_rules[tool_name] = existing + rules
+            logger.info(
+                "AgentFactory: 权限已设置 mode={}, deny_rules={}, allow_rules={}",
+                mode_str,
+                sum(len(v) for v in deny_rules.values()),
+                sum(len(v) for v in allow_rules.values()),
+            )
+        else:
+            logger.warning(
+                "AgentFactory: agent.state 缺少 permission_context，跳过权限设置"
+            )

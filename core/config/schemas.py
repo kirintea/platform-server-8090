@@ -96,6 +96,29 @@ class InjectionConfigSchema(BaseModel):
     extra_fields: dict[str, str] = Field(default_factory=dict, description="自定义注入字段")
 
 
+class PermissionRuleEntry(BaseModel):
+    """单条权限规则"""
+    tool_name: str = Field(description="工具名: Bash / Read / Write / Edit / 自定义工具名")
+    rule_content: str = Field(description="匹配模式（Bash: 前缀通配, 文件工具: glob, 其他: JSON 精确匹配）")
+    source: str = Field(default="platform-config", description="规则来源标识")
+
+
+class PermissionConfig(BaseModel):
+    """细粒度权限配置"""
+    mode: str = Field(
+        default="bypass",
+        description="权限模式: default / accept_edits / explore / bypass / dont_ask",
+    )
+    deny_rules: list[PermissionRuleEntry] = Field(
+        default_factory=list,
+        description="拒绝规则列表（优先级最高，所有模式下生效）",
+    )
+    allow_rules: list[PermissionRuleEntry] = Field(
+        default_factory=list,
+        description="允许规则列表（在工具检查之后评估）",
+    )
+
+
 class AgentConfig(BaseModel):
     """Agent 行为配置"""
     model_config = ConfigDict(extra="forbid")
@@ -111,7 +134,11 @@ class AgentConfig(BaseModel):
         default_factory=InjectionConfigSchema,
         description="运行时注入配置",
     )
-    permission_mode: str = Field(default="bypass", description="权限模式: auto / bypass")
+    permission_mode: str = Field(default="bypass", description="权限模式（旧字段，优先使用 permission.mode）")
+    permission: PermissionConfig = Field(
+        default_factory=PermissionConfig,
+        description="细粒度权限配置",
+    )
     sandbox_dir: str = Field(
         default="workspaces",
         description="Agent 沙箱根目录（相对项目根或绝对路径），所有工具操作限制在此目录内",
