@@ -31,6 +31,7 @@ class LLMConfig(BaseModel):
     context_size: int = Field(default=128000, description="上下文窗口大小 (token)")
     max_tokens: int = Field(default=4096, description="最大输出 token 数")
     temperature: float = Field(default=0.7, description="采样温度")
+    timeout: int = Field(default=120, description="LLM 调用超时（秒），流式模式下为无事件空闲超时")
 
 
 class ServerConfig(BaseModel):
@@ -171,11 +172,21 @@ class BudgetControlConfig(BaseModel):
     output_weight: int = Field(default=2, description="输出 token 权重")
 
 
+class RateLimitConfig(BaseModel):
+    """速率限制配置"""
+    enabled: bool = Field(default=True, description="是否启用速率限制")
+    requests_per_minute: int = Field(default=10, description="每分钟最大请求数（per-user）")
+
+
 class MiddlewareConfig(BaseModel):
     """中间件配置"""
     budget_control: BudgetControlConfig = Field(
         default_factory=BudgetControlConfig,
         description="回复预算控制配置",
+    )
+    rate_limit: RateLimitConfig = Field(
+        default_factory=RateLimitConfig,
+        description="速率限制配置",
     )
 
 
@@ -184,6 +195,18 @@ class SandboxMountConfig(BaseModel):
     host: str = Field(description="宿主机路径（相对于项目根）")
     container: str = Field(description="容器内挂载路径（绝对路径）")
     readonly: bool = Field(default=True, description="是否只读")
+
+
+class AuthConfig(BaseModel):
+    """API 认证配置"""
+    required: bool = Field(
+        default=False,
+        description="是否启用 API Key 认证（生产环境必须为 true）",
+    )
+    api_key: str = Field(
+        default="",
+        description="API 密钥（通过环境变量 API_KEY 注入）",
+    )
 
 
 class SandboxConfig(BaseModel):
@@ -204,6 +227,10 @@ class SandboxConfig(BaseModel):
         default_factory=list,
         description="额外挂载列表（如 skills/ 目录）",
     )
+    fallback_to_local: bool = Field(
+        default=True,
+        description="沙箱不可用时是否降级到本地执行（生产环境建议 false）",
+    )
 
 
 # ============================================================
@@ -217,6 +244,7 @@ class AppConfig(BaseModel):
     otel: OTelConfig
     llm: LLMConfig
     server: ServerConfig = Field(default_factory=ServerConfig)
+    auth: AuthConfig = Field(default_factory=AuthConfig, description="API 认证配置")
     agent: AgentConfig = Field(default_factory=AgentConfig)
     mcp_servers: list[MCPConfig] = Field(default_factory=list, description="MCP 服务列表")
     database: DatabaseConfig = Field(default_factory=DatabaseConfig)

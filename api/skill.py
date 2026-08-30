@@ -15,7 +15,7 @@ from fastapi import APIRouter, HTTPException, Request, status
 from pydantic import BaseModel, Field
 
 from core.storage_models import SkillRecord
-from core.validators import coerce_id
+from core.validators import coerce_id, is_auth_enabled, require_user_id
 
 from loguru import logger
 
@@ -84,7 +84,8 @@ def _skill_to_response(record: SkillRecord) -> SkillResponse:
 @router.get("", response_model=ListSkillsResponse)
 async def list_skills(request: Request, user_id: str = "anonymous"):
     """列出已安装 Skill"""
-    user_id = coerce_id(user_id)
+    config = getattr(request.app.state, "config", None)
+    user_id = require_user_id(user_id, is_auth_enabled(config))
     storage = request.app.state.storage
     skills = await storage.list_skills(user_id)
     return ListSkillsResponse(
@@ -104,7 +105,8 @@ async def create_skill(
     user_id: str = "anonymous",
 ):
     """添加 Skill"""
-    user_id = coerce_id(user_id)
+    config = getattr(request.app.state, "config", None)
+    user_id = require_user_id(user_id, is_auth_enabled(config))
     storage = request.app.state.storage
 
     # 检查名称唯一性
@@ -137,7 +139,8 @@ async def get_skill(
     user_id: str = "anonymous",
 ):
     """获取单个 Skill"""
-    user_id = coerce_id(user_id)
+    config = getattr(request.app.state, "config", None)
+    user_id = require_user_id(user_id, is_auth_enabled(config))
     storage = request.app.state.storage
     record = await storage.get_skill(user_id, skill_id)
     if not record:
@@ -155,7 +158,8 @@ async def delete_skill(
     user_id: str = "anonymous",
 ):
     """删除 Skill"""
-    user_id = coerce_id(user_id)
+    config = getattr(request.app.state, "config", None)
+    user_id = require_user_id(user_id, is_auth_enabled(config))
     storage = request.app.state.storage
     deleted = await storage.delete_skill(user_id, skill_id)
     if not deleted:

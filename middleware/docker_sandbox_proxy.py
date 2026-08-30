@@ -25,7 +25,6 @@
 from __future__ import annotations
 
 import json
-import logging
 import os
 import shlex
 import textwrap
@@ -33,13 +32,13 @@ from typing import Any
 
 import docker
 
+from loguru import logger
+
 from agentscope.middleware import MiddlewareBase
 from agentscope.message import TextBlock, ToolResultState
 from agentscope.tool import ToolResponse
 
 from core.config.schemas import SandboxConfig
-
-logger = logging.getLogger(__name__)
 
 # 需要拦截转发到沙箱的工具
 _INTERCEPT_TOOLS = frozenset({
@@ -84,6 +83,7 @@ class DockerSandboxProxy(MiddlewareBase):
         self._container_name = sandbox_config.container
         self._container_project_root = sandbox_config.project_root
         self._host_project_root = host_project_root
+        self._fallback_to_local = sandbox_config.fallback_to_local
 
         # 通过 Docker Socket 连接 Docker daemon
         self._docker_client: docker.DockerClient | None = None
@@ -151,8 +151,16 @@ class DockerSandboxProxy(MiddlewareBase):
                 yield item
             return
 
-        # 沙箱容器不可用时降级到本地执行
+        # 沙箱容器不可用时的处理
         if self._container is None:
+            if not self._fallback_to_local:
+                logger.error("沙箱容器不可用且禁止降级到本地执行: %s", tool_name)
+                yield ToolResponse(
+                    id=tool_call.id,
+                    content=[TextBlock(text="[Sandbox] 沙箱容器不可用，且配置禁止降级到本地执行 (fallback_to_local=false)")],
+                    state=ToolResultState.DENIED,
+                )
+                return
             logger.warning("沙箱容器不可用，降级到本地执行: %s", tool_name)
             async for item in next_handler(**input_kwargs):
                 yield item
@@ -162,6 +170,14 @@ class DockerSandboxProxy(MiddlewareBase):
             response = self._exec_in_sandbox(tool_name, tool_call)
             yield response
         except Exception as e:
+            if not self._fallback_to_local:
+                logger.error("沙箱执行失败且禁止降级到本地: %s", e)
+                yield ToolResponse(
+                    id=tool_call.id,
+                    content=[TextBlock(text=f"[Sandbox] 沙箱执行失败，且配置禁止降级到本地: {e}")],
+                    state=ToolResultState.DENIED,
+                )
+                return
             logger.error("沙箱执行失败，降级到本地执行: %s", e)
             async for item in next_handler(**input_kwargs):
                 yield item

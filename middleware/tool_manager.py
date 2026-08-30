@@ -13,11 +13,12 @@
 from __future__ import annotations
 
 import importlib
-import logging
 from pathlib import Path
 from typing import Any
 
 import yaml
+
+from loguru import logger
 
 from agentscope.tool import (
     Bash,
@@ -34,8 +35,6 @@ from agentscope.tool import (
     ToolBase,
     Write,
 )
-
-logger = logging.getLogger(__name__)
 
 
 class ToolManagerMiddleware:

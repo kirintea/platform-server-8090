@@ -25,15 +25,14 @@ from __future__ import annotations
 
 import fnmatch
 import json
-import logging
 import re
 from typing import Any
+
+from loguru import logger
 
 from agentscope.middleware import MiddlewareBase
 from agentscope.message import TextBlock, ToolResultState
 from agentscope.tool import ToolResponse
-
-logger = logging.getLogger(__name__)
 
 
 # High-risk patterns are ALWAYS blocked in BOTH blocklist and allowlist modes.

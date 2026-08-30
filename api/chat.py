@@ -19,6 +19,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import os
 import uuid
 from typing import AsyncGenerator
 
@@ -32,9 +33,41 @@ from agentscope.message import Msg, UserMsg
 from loguru import logger
 
 from core.chat_service import acquire_session_lock, session_lock_key
-from core.validators import coerce_id
+from core.token_counter import count_tokens
+from core.validators import coerce_id, is_auth_enabled, require_user_id
+
+
+async def _stream_with_timeout(agen, timeout: int):
+    """包装异步生成器，添加空闲超时保护。
+
+    如果在 timeout 秒内没有从 LLM 收到任何事件，抛出 asyncio.TimeoutError。
+    避免 LLM 提供商挂起时 SSE/Socket 连接无限期等待。
+    """
+    while True:
+        try:
+            event = await asyncio.wait_for(agen.__anext__(), timeout=timeout)
+            yield event
+        except StopAsyncIteration:
+            break
+        except asyncio.TimeoutError:
+            raise  # 向上传播，由调用方处理
 
 router = APIRouter()
+
+
+def _validate_user_id(request: Request, user_id: str) -> str:
+    """认证启用时校验 user_id — 不允许 'anonymous'。
+
+    认证关闭时保持原有 coerce_id 行为（静默回退到 anonymous）。
+    """
+    config = getattr(request.app.state, "config", None)
+    try:
+        return require_user_id(user_id, is_auth_enabled(config))
+    except ValueError:
+        raise HTTPException(
+            status_code=400,
+            detail="认证启用时必须提供有效的 user_id（不允许 'anonymous'）",
+        )
 
 # 追踪后台持久化任务，避免被 GC 回收（见 shutdown_persist_tasks）。
 _PERSIST_TASKS: set[asyncio.Task] = set()
@@ -137,7 +170,7 @@ async def chat_stream(request: Request, body: ChatRequest):
     bus = getattr(request.app.state, "message_bus", None)
 
     # 规范化用户 / 会话标识（防止路径穿越等非法输入）
-    user_id = coerce_id(body.user_id)
+    user_id = _validate_user_id(request, body.user_id)
     session_id = body.session_id or str(uuid.uuid4())
     session_id = coerce_id(session_id, default=str(uuid.uuid4()))
 
@@ -168,7 +201,14 @@ async def chat_stream(request: Request, body: ChatRequest):
                     await session_mgr.refresh_state(user_id, session_id)
                     user_msg = UserMsg(name="user", content=body.message)
 
-                    async for event in agent.reply_stream(user_msg):
+                    # LLM 超时保护：config.llm.timeout（默认 120s）
+                    llm_timeout = getattr(
+                        getattr(request.app.state.config, "llm", None),
+                        "timeout", 120,
+                    )
+                    async for event in _stream_with_timeout(
+                        agent.reply_stream(user_msg), llm_timeout,
+                    ):
                         if not hasattr(event, "type"):
                             if isinstance(event, Msg):
                                 yield _sse_event("reply_end", {
@@ -269,6 +309,9 @@ async def chat_stream(request: Request, body: ChatRequest):
             # 的上下文清理可能抛出 "token was created in a different Context"，
             # 这是已知的 OTel + async generator 问题，不影响功能。
             logger.debug("SSE 生成器关闭: user={} session={}", body.user_id, session_id)
+        except asyncio.TimeoutError:
+            logger.error("LLM 调用超时: user={} session={}", body.user_id, session_id)
+            yield _sse_event("error", {"message": f"LLM 调用超时（{llm_timeout}s），请重试"})
         except Exception as e:
             logger.exception("流式回复异常")
             yield _sse_event("error", {"message": str(e)})
@@ -297,12 +340,44 @@ async def chat_stream(request: Request, body: ChatRequest):
 
 @router.get("/health")
 async def health(request: Request):
-    """健康检查"""
+    """健康检查 — 验证 Redis / PostgreSQL 连通性"""
     session_mgr = request.app.state.session_manager
-    return {
-        "status": "ok",
-        "active_sessions": session_mgr.active_count,
-    }
+    config = getattr(request.app.state, "config", None)
+    checks = {}
+    overall_ok = True
+
+    # Redis 检查
+    try:
+        import redis as redis_lib
+        redis_url = getattr(getattr(config, "redis", None), "url", "redis://localhost:6379/0")
+        r = redis_lib.from_url(redis_url, socket_timeout=3)
+        r.ping()
+        checks["redis"] = "ok"
+    except Exception as e:
+        checks["redis"] = f"error: {e}"
+        overall_ok = False
+
+    # PostgreSQL 检查
+    db = getattr(request.app.state, "database_manager", None)
+    if db and db.is_initialized:
+        try:
+            result = await db.fetchval("SELECT 1")
+            checks["postgres"] = "ok" if result == 1 else f"unexpected: {result}"
+        except Exception as e:
+            checks["postgres"] = f"error: {e}"
+            overall_ok = False
+    else:
+        checks["postgres"] = "not_configured"
+
+    status_code = 200 if overall_ok else 503
+    return JSONResponse(
+        status_code=status_code,
+        content={
+            "status": "ok" if overall_ok else "degraded",
+            "checks": checks,
+            "active_sessions": session_mgr.active_count,
+        },
+    )
 
 
 @router.get("/sessions")
@@ -531,9 +606,9 @@ async def get_session_context(
             "summary_exists": False,
         }
 
-    # 估算 token 数
+    # 估算 token 数（使用 tiktoken 精确计数）
     context = getattr(state, "context", [])
-    total_chars = 0
+    total_text = ""
     msg_count = len(context)
     for msg in context:
         content = getattr(msg, "content", [])
@@ -541,12 +616,13 @@ async def get_session_context(
             for block in content:
                 text = getattr(block, "text", "")
                 if text:
-                    total_chars += len(text)
+                    total_text += text + "\n"
         elif isinstance(content, str):
-            total_chars += len(content)
+            total_text += content + "\n"
 
-    # 粗略估算（中文约 1.5 token/字，英文约 0.25 token/word）
-    estimated_tokens = total_chars * 2 // 3  # 中英文混合的折中估算
+    # 获取模型名称用于选择编码器
+    model_name = getattr(getattr(config, "llm", None), "model", "default")
+    estimated_tokens = count_tokens(total_text, model_name=model_name)
     usage_ratio = estimated_tokens / context_size if context_size > 0 else 0.0
 
     # 状态判断
@@ -639,7 +715,7 @@ async def chat_trigger(request: Request, body: ChatTriggerRequest):
     db = getattr(request.app.state, "database_manager", None)
 
     # 规范化用户 / 会话标识（防止路径穿越等非法输入）
-    user_id = coerce_id(body.user_id)
+    user_id = _validate_user_id(request, body.user_id)
     session_id = body.session_id or str(uuid.uuid4())
     session_id = coerce_id(session_id, default=str(uuid.uuid4()))
 
@@ -652,9 +728,11 @@ async def chat_trigger(request: Request, body: ChatTriggerRequest):
         )
 
     # 后台触发 chat run（传入 db 以进行 PG 双写）
-    asyncio.create_task(
+    task = asyncio.create_task(
         chat_service.run(user_id, session_id, body.message, db)
     )
+    _PERSIST_TASKS.add(task)
+    task.add_done_callback(_PERSIST_TASKS.discard)
 
     return ChatTriggerResponse(status="started", session_id=session_id)
 

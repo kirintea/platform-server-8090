@@ -27,18 +27,17 @@
 from __future__ import annotations
 
 import json
-import logging
 import os
 import re
 import shlex
 from pathlib import Path
 from typing import Any
 
+from loguru import logger
+
 from agentscope.middleware import MiddlewareBase
 from agentscope.message import TextBlock, ToolResultState
 from agentscope.tool import ToolResponse
-
-logger = logging.getLogger(__name__)
 
 # 工具名 → 路径参数字段
 # 注意：字段名必须与 AgentScope 工具 input_schema 中的 property name 一致

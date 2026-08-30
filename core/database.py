@@ -320,13 +320,25 @@ class DatabaseManager:
         if not self._pool:
             return
 
+        # 幂等性冲突错误码（可安全忽略）
+        _IDEMPOTENT_CODES = {
+            "42P07",  # duplicate_table
+            "42710",  # duplicate_object
+            "42P16",  # invalid_table_definition (IF NOT EXISTS 兜底)
+        }
+
         async with self._pool.acquire() as conn:
             for ddl in DDL_STATEMENTS:
                 try:
                     await conn.execute(ddl)
                 except Exception as e:
-                    # 索引已存在等错误可忽略
-                    logger.warning("DDL 执行警告: {}", e)
+                    # 区分幂等性冲突（可忽略）和真正的 DDL 错误（应告警）
+                    pgcode = getattr(e, "sqlstate", None) or getattr(e, "pgcode", None)
+                    if pgcode and str(pgcode) in _IDEMPOTENT_CODES:
+                        logger.debug("DDL 幂等跳过 ({}): {}", pgcode, e)
+                    else:
+                        logger.error("DDL 执行失败: {}", e)
+                        raise
 
         logger.info("DatabaseManager: DDL 建表完成")
 

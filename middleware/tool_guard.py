@@ -22,16 +22,15 @@
 from __future__ import annotations
 
 import fnmatch
-import logging
 from typing import Any
+
+from loguru import logger
 
 from agentscope.middleware import MiddlewareBase
 from agentscope.message import TextBlock, ToolResultState
 from agentscope.tool import ToolResponse
 
 from core.config.schemas import ToolGuardConfig
-
-logger = logging.getLogger(__name__)
 
 
 class ToolGuardMiddleware(MiddlewareBase):

@@ -52,7 +52,16 @@ def _security_headers_middleware(app):
     """始终开启的安全响应头（对开发 / 生产均无害）"""
     _SEC_HEADERS = {
         b"strict-transport-security": b"max-age=31536000; includeSubDomains",
-        b"content-security-policy": b"default-src 'self'",
+        b"content-security-policy": (
+            b"default-src 'self'; "
+            b"script-src 'self' 'unsafe-inline' 'unsafe-eval'; "
+            b"style-src 'self' 'unsafe-inline'; "
+            b"img-src 'self' data: blob:; "
+            b"connect-src 'self' ws: wss:; "
+            b"font-src 'self' data:; "
+            b"object-src 'none'; "
+            b"base-uri 'self'"
+        ),
         b"x-content-type-options": b"nosniff",
         b"referrer-policy": b"no-referrer",
     }
@@ -81,11 +90,13 @@ def _security_headers_middleware(app):
     return middleware
 
 
-def _api_key_auth_middleware(app):
-    """全局 API-Key 鉴权（默认关闭，仅 AUTH_REQUIRED=true 时生效）
+def _api_key_auth_middleware(app, *, auth_required: bool = False, api_key: str = ""):
+    """全局 API-Key 鉴权（默认关闭，仅 auth_required=True 或 AUTH_REQUIRED=true 时生效）
 
     放行路径：/webui、/webui/、/health、/docs、/openapi.json、/redoc
     以及所有以 /webui/ 开头的路径。其余路径需携带正确的 X-API-Key 请求头。
+
+    优先级：环境变量 AUTH_REQUIRED/API_KEY > YAML 配置 auth.required/auth.api_key。
     """
     _PUBLIC_EXACT = {
         "/webui", "/webui/", "/health", "/docs",
@@ -96,8 +107,17 @@ def _api_key_auth_middleware(app):
         if scope["type"] != "http":
             await app(scope, receive, send)
             return
-        # 默认关闭：未开启 AUTH_REQUIRED 时直接放行，开发环境不受影响
-        if os.environ.get("AUTH_REQUIRED", "false").lower() != "true":
+
+        # 环境变量优先，YAML 配置兜底
+        env_required = os.environ.get("AUTH_REQUIRED", "").lower()
+        if env_required == "true":
+            is_auth_required = True
+        elif env_required == "false":
+            is_auth_required = False
+        else:
+            is_auth_required = auth_required
+
+        if not is_auth_required:
             await app(scope, receive, send)
             return
 
@@ -108,8 +128,10 @@ def _api_key_auth_middleware(app):
 
         headers = {k.lower(): v for k, v in scope.get("headers", [])}
         provided = headers.get(b"x-api-key", b"").decode("latin-1")
-        expected = os.environ.get("API_KEY", "")
+        expected = os.environ.get("API_KEY") or api_key
         if expected and provided == expected:
+            # 将已验证的 API key 存入 scope state，供下游端点使用
+            scope.setdefault("state", {})["api_key"] = provided
             await app(scope, receive, send)
             return
 
@@ -325,7 +347,21 @@ def create_app(config) -> FastAPI:
     # 中间件（纯 ASGI 包裹，置于最终返回前）
     # 顺序：API-Key 鉴权在内，安全响应头在外（对所有响应生效，含 401）
     # ------------------------------------------------------------
-    app = _api_key_auth_middleware(app)
+    # 速率限制（在 auth 之前，基于 API Key 或 user_id 限流）
+    from middleware.rate_limit import RateLimitMiddleware
+    rl_config = getattr(config.middleware, "rate_limit", None)
+    if rl_config and rl_config.enabled:
+        app = RateLimitMiddleware(
+            app,
+            requests_per_minute=rl_config.requests_per_minute,
+            enabled=True,
+        )
+
+    app = _api_key_auth_middleware(
+        app,
+        auth_required=getattr(config.auth, "required", False),
+        api_key=getattr(config.auth, "api_key", ""),
+    )
     app = _security_headers_middleware(app)
 
     return app

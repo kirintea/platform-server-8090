@@ -38,9 +38,21 @@ from agentscope.message import Msg, UserMsg
 from loguru import logger
 
 from core.chat_service import acquire_session_lock
-from core.validators import coerce_id
+from core.validators import coerce_id, coerce_id_strict, is_auth_enabled
 
 router = APIRouter()
+
+
+async def _stream_with_timeout(agen, timeout: int):
+    """包装异步生成器，添加空闲超时保护。"""
+    while True:
+        try:
+            event = await asyncio.wait_for(agen.__anext__(), timeout=timeout)
+            yield event
+        except StopAsyncIteration:
+            break
+        except asyncio.TimeoutError:
+            raise
 
 # 追踪后台持久化任务，避免被 GC 回收（见 shutdown_persist_tasks）。
 _PERSIST_TASKS: set[asyncio.Task] = set()
@@ -119,7 +131,18 @@ async def websocket_chat(
     """
     await ws.accept()
     # 规范化用户 / 会话标识（防止路径穿越等非法输入）
-    user_id = coerce_id(user_id)
+    # 认证启用时，严格校验 user_id（不允许 'anonymous'）
+    config = getattr(ws.app.state, "config", None)
+    auth_required = is_auth_enabled(config)
+    if auth_required:
+        try:
+            user_id = coerce_id_strict(user_id, "user_id")
+        except ValueError:
+            await _send_json(ws, "error", {"message": "认证启用时必须提供有效的 user_id"})
+            await ws.close(code=4400, reason="invalid user_id")
+            return
+    else:
+        user_id = coerce_id(user_id)
     session_id = session_id or str(uuid.uuid4())
     session_id = coerce_id(session_id, default=str(uuid.uuid4()))
 
@@ -264,7 +287,14 @@ async def _handle_chat(
 
                 user_msg = UserMsg(name="user", content=message)
 
-                async for event in agent.reply_stream(user_msg):
+                # LLM 超时保护
+                llm_timeout = getattr(
+                    getattr(ws.app.state.config, "llm", None),
+                    "timeout", 120,
+                )
+                async for event in _stream_with_timeout(
+                    agent.reply_stream(user_msg), llm_timeout,
+                ):
                     # 检查取消
                     if cancelled.is_set():
                         break
@@ -359,6 +389,14 @@ async def _handle_chat(
                 # 读取到过期状态导致本轮对话丢失（state-loss race）。
                 await session_mgr.save(user_id, session_id)
 
+    except asyncio.TimeoutError:
+        logger.error("LLM 调用超时: user={} session={}", user_id, session_id)
+        try:
+            await _send_json(ws, "error", {
+                "message": f"LLM 调用超时（{llm_timeout}s），请重试",
+            })
+        except Exception:
+            pass
     except asyncio.CancelledError:
         logger.info("对话生成被取消: user={} session={}", user_id, session_id)
         raise

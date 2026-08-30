@@ -2,12 +2,10 @@
 
 from __future__ import annotations
 
-import logging
 import os
 import re
 
-
-logger = logging.getLogger(__name__)
+from loguru import logger
 
 
 class EnvVarResolver:
