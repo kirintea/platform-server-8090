@@ -203,22 +203,30 @@ async def websocket_chat(
     # --- 重连协调：检查同一 session 是否有待取回复或后台任务 ---
     bg_key = (user_id, session_id)
     bg_task = _BACKGROUND_TASKS.get(bg_key)
+    try:
+        meta = await session_mgr.load_session_meta(user_id, session_id)
+    except Exception:
+        meta = None
+
     if bg_task and not bg_task.done():
-        # 旧连接断开后任务仍在后台运行
+        # 旧连接断开后任务仍在后台运行，推送已有的部分内容
+        partial_text = (meta or {}).get("last_reply", "")
         await _send_json(ws, "generation_in_progress", {
-            "message": "上一轮回复仍在生成中，请等待",
+            "message": "上一轮回复仍在生成中",
+            "partial_text": partial_text,
         })
-    else:
-        # 检查是否有断连期间生成完成的回复
-        try:
-            meta = await session_mgr.load_session_meta(user_id, session_id)
-            if meta and meta.get("reply_status") == "completed" and meta.get("last_reply"):
-                await _send_json(ws, "pending_reply", {
-                    "text": meta["last_reply"],
-                    "reply_status": "completed",
-                })
-        except Exception:
-            pass
+    elif meta and meta.get("reply_status") == "completed" and meta.get("last_reply"):
+        # 后台任务已完成，推送完整回复
+        await _send_json(ws, "pending_reply", {
+            "text": meta["last_reply"],
+            "reply_status": "completed",
+        })
+    elif meta and meta.get("last_reply"):
+        # 任务已结束但非 completed（超时/取消等），推送已有内容
+        await _send_json(ws, "pending_reply", {
+            "text": meta["last_reply"],
+            "reply_status": meta.get("reply_status", "partial"),
+        })
 
     # 当前正在执行的生成任务（用于 cancel）
     current_task: asyncio.Task | None = None
@@ -412,6 +420,7 @@ async def _handle_chat(
     full_thinking = ""
     ws_alive = True                          # 连接存活标志
     reply_status = "partial"                 # 默认状态，finally 中根据实际情况更新
+    _pending_save_count = 0                  # 断连后增量保存计数器
 
     # 注册到后台任务表（断连后任务继续运行时，重连可通过此表查询）
     bg_key = (user_id, session_id)
@@ -500,6 +509,16 @@ async def _handle_chat(
                     match event.type:
                         case EventType.TEXT_BLOCK_DELTA:
                             full_reply += event.delta
+                            # 断连后增量写入元数据（每 10 个 delta 保存一次）
+                            if not ws_alive:
+                                _pending_save_count += 1
+                                if _pending_save_count % 10 == 0:
+                                    try:
+                                        await session_mgr.save_session_reply(
+                                            user_id, session_id, full_reply, "partial",
+                                        )
+                                    except Exception:
+                                        pass
                         case EventType.THINKING_BLOCK_DELTA:
                             full_thinking += event.delta
                         case EventType.TOOL_CALL_START:
@@ -615,8 +634,9 @@ async def _handle_chat(
         # 从后台任务表注销
         _BACKGROUND_TASKS.pop(bg_key, None)
 
-        # 断连但生成完成时，将回复写入 session 元数据（供重连拉取）
-        if not ws_alive and full_reply and reply_status == "completed":
+        # 断连时将已累积的回复写入元数据（供重连拉取）
+        # completed 时写入完整回复，其他状态写入已有内容
+        if not ws_alive and full_reply:
             try:
                 await session_mgr.save_session_reply(
                     user_id, session_id, full_reply, reply_status,
