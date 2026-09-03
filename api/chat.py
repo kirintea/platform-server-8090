@@ -226,6 +226,11 @@ async def chat_stream(request: Request, body: ChatRequest):
                         )
 
                     agent = await session_mgr.get_or_create(user_id, session_id)
+                    # 注入 OTel 追踪上下文（供 TracingContextMiddleware 使用）
+                    agent.__tracing_context__ = {
+                        "agentscope.user.id": user_id,
+                        "agentscope.device.id": device_id,
+                    }
                     await session_mgr.refresh_state(user_id, session_id)
                     user_msg = UserMsg(name="user", content=body.message)
 

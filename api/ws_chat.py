@@ -390,6 +390,11 @@ async def _handle_chat(
                     )
 
                 agent = await session_mgr.get_or_create(user_id, session_id)
+                # 注入 OTel 追踪上下文（供 TracingContextMiddleware 使用）
+                agent.__tracing_context__ = {
+                    "agentscope.user.id": user_id,
+                    "agentscope.device.id": device_id,
+                }
                 # 多实例场景：强制刷新状态
                 await session_mgr.refresh_state(user_id, session_id)
 

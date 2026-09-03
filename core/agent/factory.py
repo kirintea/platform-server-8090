@@ -32,6 +32,7 @@ from middleware.command_guard import CommandGuardMiddleware
 from middleware.tool_manager import ToolManagerMiddleware
 from middleware.path_guard import PathGuardMiddleware
 from middleware.docker_sandbox_proxy import DockerSandboxProxy
+from middleware.tracing_context import TracingContextMiddleware
 
 
 class AgentFactory:
@@ -294,6 +295,7 @@ class AgentFactory:
         # OTel 追踪中间件（仅在启用时添加）
         if config.otel.enabled:
             middlewares.append(TracingMiddleware())
+            middlewares.append(TracingContextMiddleware())
 
         # 工具守卫中间件（工具名级）
         if config.agent.tool_guard.enabled:

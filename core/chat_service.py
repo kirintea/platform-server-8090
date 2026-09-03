@@ -139,6 +139,12 @@ class ChatService:
                 # 获取或创建 Agent
                 agent = await self._session_mgr.get_or_create(user_id, session_id)
 
+                # 注入 OTel 追踪上下文（供 TracingContextMiddleware 使用）
+                agent.__tracing_context__ = {
+                    "agentscope.user.id": user_id,
+                    "agentscope.device.id": device_id,
+                }
+
                 # 多实例无状态：每次 run 前强制从 Redis 刷新内存 AgentState，
                 # 确保拿到其他实例最近一次 save 写入的最新状态，避免用过期
                 # 上下文推理。get_or_create 返回的 agent 与内存缓存中是同一
