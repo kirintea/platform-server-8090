@@ -254,6 +254,9 @@ async def websocket_chat(
 
     subscriber_task = asyncio.create_task(_session_event_subscriber())
 
+    # 连接存活标志（主循环作用域，供事件转发过滤使用）
+    ws_alive = True
+
     try:
         while True:
             # 同时等待用户消息和 session 事件（观察者模式核心）
@@ -286,7 +289,12 @@ async def websocket_chat(
                             "device_id": evt.get("device_id"),
                             "message": "其他设备正在生成回复",
                         })
-                    # 转发所有事件给前端
+                    # 连接存活时，跳过 text_delta / thinking_delta 转发，
+                    # 因为 _handle_chat 已通过 WebSocket 直接发送这些事件。
+                    # 若同时转发会导致前端叠字（每条 delta 收到两次）。
+                    if ws_alive and evt_type in ("text_delta", "thinking_delta"):
+                        continue
+                    # 转发事件给前端
                     await _send_json(ws, evt_type, evt)
                     continue
 
@@ -342,10 +350,12 @@ async def websocket_chat(
                     if target and not target.done():
                         cancelled.set()
                         target.cancel()
+                        logger.info("WebSocket cancel 信号已发送: user={} session={} task={}", user_id, session_id, id(target))
                         try:
                             await target
                         except (asyncio.CancelledError, Exception):
                             pass
+                        logger.info("WebSocket cancel 完成: user={} session={}", user_id, session_id)
                         await _send_json(ws, "reply_end", {
                             "finished_reason": "cancelled",
                             "finished": True,
@@ -385,8 +395,10 @@ async def websocket_chat(
                     })
 
     except WebSocketDisconnect:
+        ws_alive = False
         logger.info("WebSocket 断开: user={} session={}", user_id, session_id)
     except Exception:
+        ws_alive = False
         logger.exception("WebSocket 异常: user={} session={}", user_id, session_id)
     finally:
         # 断连时不清除 current_task，让它在 _BACKGROUND_TASKS 中继续运行。
@@ -539,11 +551,13 @@ async def _handle_chat(
                                         )
                                     except Exception:
                                         pass
-                            # Redis 广播：断连后持续 publish，重连客户端可实时接收
-                            await _publish_event("text_delta", {"delta": event.delta})
+                                # 仅断连时通过 Redis 广播（ws_alive 时直接 WS 发送，
+                                # 若同时 Redis 广播会导致 observer 回送→叠字）
+                                await _publish_event("text_delta", {"delta": event.delta})
                         case EventType.THINKING_BLOCK_DELTA:
                             full_thinking += event.delta
-                            await _publish_event("thinking_delta", {"delta": event.delta})
+                            if not ws_alive:
+                                await _publish_event("thinking_delta", {"delta": event.delta})
                         case EventType.TOOL_CALL_START:
                             tool_call_id = getattr(event, "tool_call_id", "")
                             tool_name = getattr(event, "tool_call_name", "")
@@ -656,7 +670,7 @@ async def _handle_chat(
             })
     except asyncio.CancelledError:
         reply_status = "cancelled"
-        logger.info("对话生成被取消: user={} session={}", user_id, session_id)
+        logger.info("对话生成被取消: user={} session={} reply_len={}", user_id, session_id, len(full_reply))
         raise
     except GeneratorExit:
         reply_status = "partial"

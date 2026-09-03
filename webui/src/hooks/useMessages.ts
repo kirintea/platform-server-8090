@@ -25,6 +25,10 @@ export function useMessages(userId: string, sessionId: string | null) {
 	/** 处理 WebSocket 消息（用 ref 保证闭包不陈旧） */
 	const handleWsMessageRef = useRef<(msg: WsMessage) => void>(() => {});
 	handleWsMessageRef.current = (msg: WsMessage) => {
+		// 调试：重连后消息流
+		if (msg.type !== 'pong') {
+			console.debug('[WS recv]', msg.type, msg.payload);
+		}
 		switch (msg.type) {
 			case 'connected':
 				break;
@@ -163,6 +167,7 @@ export function useMessages(userId: string, sessionId: string | null) {
 
 			case 'generation_in_progress': {
 				// 后台任务仍在运行，初始化部分内容并进入 streaming 状态
+				console.debug('[WS] generation_in_progress:', msg.payload);
 				const bgPayload = msg.payload as { partial_text?: string };
 				setPhase('streaming');
 				if (bgPayload.partial_text) {
