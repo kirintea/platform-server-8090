@@ -342,6 +342,7 @@ class SessionManager:
 
         应在每次 reply/reply_stream 完成后调用。
         同时保存会话元数据（标题、消息数等）。
+        正常完成时清除 reply_status / last_reply，避免重连时推送过期数据。
         """
         key = (user_id, session_id)
         async with self._lock:
@@ -365,6 +366,22 @@ class SessionManager:
                         title = content[:30]
                     break
             await self.save_session_meta(user_id, session_id, title, msg_count)
+
+            # 正常 save（非断连场景）清除旧的 pending_reply 标记
+            if self._redis:
+                try:
+                    meta_key = self._redis_meta_key(user_id, session_id)
+                    existing = await self._load_session_meta(user_id, session_id)
+                    if existing and existing.get("reply_status"):
+                        existing.pop("reply_status", None)
+                        existing.pop("last_reply", None)
+                        await self._redis.set(
+                            meta_key,
+                            json.dumps(existing, ensure_ascii=False),
+                            ex=self._session_ttl,
+                        )
+                except Exception:
+                    pass
 
     async def remove(self, user_id: str, session_id: str) -> bool:
         """移除指定会话（同时清除 Redis 中的状态）"""
@@ -487,6 +504,44 @@ class SessionManager:
             )
         except Exception:
             logger.exception("保存会话元数据失败: user={} session={}", user_id, session_id)
+
+    async def save_session_reply(
+        self,
+        user_id: str,
+        session_id: str,
+        last_reply: str,
+        reply_status: str = "completed",
+    ) -> None:
+        """将断连期间生成的回复写入会话元数据（供前端重连时拉取）。
+
+        Args:
+            last_reply: 最后一条 assistant 回复文本
+            reply_status: 回复状态（completed / partial / timeout / error）
+        """
+        if not self._redis:
+            return
+
+        existing = await self._load_session_meta(user_id, session_id) or {}
+        meta = {
+            **existing,
+            "session_id": session_id,
+            "user_id": user_id,
+            "last_reply": last_reply[-2000:],  # 截断防爆（保留最后 2000 字符）
+            "reply_status": reply_status,
+            "last_active": time.time(),
+        }
+
+        key = self._redis_meta_key(user_id, session_id)
+        try:
+            await self._redis.set(
+                key, json.dumps(meta, ensure_ascii=False), ex=self._session_ttl,
+            )
+        except Exception:
+            logger.exception("保存回复元数据失败: user={} session={}", user_id, session_id)
+
+    async def load_session_meta(self, user_id: str, session_id: str) -> dict | None:
+        """公开接口：从 Redis 加载会话元数据。"""
+        return await self._load_session_meta(user_id, session_id)
 
     async def _load_session_meta(self, user_id: str, session_id: str) -> dict | None:
         """从 Redis 加载会话元数据"""
