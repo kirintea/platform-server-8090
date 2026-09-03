@@ -437,6 +437,21 @@ async def _handle_chat(
         if bus is not None else contextlib.nullasynccontext()
     )
 
+    # Redis 广播 key（断连后持续 publish，重连客户端可通过订阅收到实时更新）
+    from agentscope.app.message_bus import MessageBusKeys
+    events_key = MessageBusKeys.session_events(session_id)
+
+    async def _publish_event(evt_type: str, payload: dict | None = None) -> None:
+        """发布事件到 Redis Message Bus（断连后仍可用）"""
+        if not bus:
+            return
+        try:
+            event = {"type": evt_type, **(payload or {})}
+            entry_id = await bus.log_append(events_key, event, max_len=1000)
+            await bus.publish(events_key, {**event, "_entry_id": entry_id})
+        except Exception:
+            logger.debug("Redis 事件广播失败: type={} session={}", evt_type, session_id)
+
     # 后台生成保护：总时长上限
     reply_deadline = asyncio.get_event_loop().time() + REPLY_MAX_DURATION
 
@@ -514,7 +529,7 @@ async def _handle_chat(
                     match event.type:
                         case EventType.TEXT_BLOCK_DELTA:
                             full_reply += event.delta
-                            # 断连后增量写入元数据（每 10 个 delta 保存一次）
+                            # 断连后：增量写入元数据（每 10 个 delta 保存一次）
                             if not ws_alive:
                                 _pending_save_count += 1
                                 if _pending_save_count % 10 == 0:
@@ -524,8 +539,11 @@ async def _handle_chat(
                                         )
                                     except Exception:
                                         pass
+                            # Redis 广播：断连后持续 publish，重连客户端可实时接收
+                            await _publish_event("text_delta", {"delta": event.delta})
                         case EventType.THINKING_BLOCK_DELTA:
                             full_thinking += event.delta
+                            await _publish_event("thinking_delta", {"delta": event.delta})
                         case EventType.TOOL_CALL_START:
                             tool_call_id = getattr(event, "tool_call_id", "")
                             tool_name = getattr(event, "tool_call_name", "")
@@ -553,6 +571,11 @@ async def _handle_chat(
                                     "tool_call_id": tool_call_id,
                                     "tool_args": args,
                                 }
+                                await _publish_event("tool_call", {
+                                    "tool_name": tool_info["name"],
+                                    "tool_call_id": tool_call_id,
+                                    "tool_args": args,
+                                })
                         case EventType.TOOL_RESULT_START:
                             tool_call_id = getattr(event, "tool_call_id", "")
                             pending_tool_results[tool_call_id] = ""
@@ -568,8 +591,16 @@ async def _handle_chat(
                             if tool_call_id in tool_call_records:
                                 tool_call_records[tool_call_id]["result"] = result_text
                                 tool_call_records[tool_call_id]["state"] = state
+                            await _publish_event("tool_result", {
+                                "tool_call_id": tool_call_id,
+                                "state": state,
+                                "result": result_text,
+                            })
                         case EventType.REPLY_END:
-                            pass  # 发送在下方
+                            await _publish_event("reply_end", {
+                                "finished_reason": str(getattr(event, "finished_reason", "")),
+                                "finished": True,
+                            })
                         case _:
                             pass
 

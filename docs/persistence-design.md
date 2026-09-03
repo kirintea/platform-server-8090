@@ -4,9 +4,9 @@
 
 本项目采用 **Redis + PostgreSQL** 双存储架构，实现对话状态的快速恢复和历史消息的长期保存。
 
-| 存储层 | 职责 | 特点 |
-|--------|------|------|
-| **Redis** | 会话状态（AgentState）、会话元数据、消息总线 | 高速读写、自动过期、支持分布式 |
+| 存储层               | 职责                                                      | 特点                           |
+| -------------------- | --------------------------------------------------------- | ------------------------------ |
+| **Redis**      | 会话状态（AgentState）、会话元数据、消息总线              | 高速读写、自动过期、支持分布式 |
 | **PostgreSQL** | 对话历史（conversations）、会话记录（sessions）、资源管理 | 持久化存储、复杂查询、事务支持 |
 
 ## 存储架构
@@ -234,7 +234,93 @@ POST /chat/stream 或 POST /chat/
             └─ 更新 sessions 表标题
 ```
 
-### 3. 历史会话恢复
+### 3. 断连续生成与重连实时推送
+
+WebSocket 断连后，后台生成任务不中断，重连后可实时接收进行中的内容并手动终止。
+
+#### 核心机制
+
+| 层                            | 断连前                  | 断连后                    | 重连后                                                  |
+| ----------------------------- | ----------------------- | ------------------------- | ------------------------------------------------------- |
+| `_handle_chat`              | WS 直推 + Redis 广播    | 仅 Redis 广播（静默模式） | —                                                      |
+| `_session_event_subscriber` | 订阅 Redis → 转发 WS   | 随 WS 断开取消            | 新建订阅，接收 Redis 事件                               |
+| 前端`useMessages`           | `text_delta` 增量渲染 | —                        | `generation_in_progress` 初始化 + `text_delta` 续接 |
+
+#### 流程
+
+```
+用户发送消息 → _handle_chat 启动
+    │
+    ├─ 累积 full_reply（始终执行）
+    ├─ WS 推送 text_delta（ws_alive=True 时）
+    ├─ Redis 广播 text_delta（始终执行）     ← 关键：断连后仍 publish
+    │
+    ▼ WebSocket 断开
+    │
+    ├─ subscriber_task 取消
+    ├─ current_task 继续运行（_BACKGROUND_TASKS 注册）
+    ├─ 每 10 个 delta 增量写入 session meta（save_session_reply）
+    │
+    ▼ 前端自动重连（指数退避，最多 5 次）
+    │
+    ├─ 后端检查 _BACKGROUND_TASKS 是否有运行中的任务
+    │   ├─ 有 → 发送 generation_in_progress { partial_text, source: "background" }
+    │   └─ 无但 meta 有 last_reply → 发送 pending_reply { text, reply_status }
+    │
+    ├─ 新建 _session_event_subscriber（订阅 Redis Pub/Sub）
+    │
+    ├─ 前端收到 generation_in_progress：
+    │   ├─ setPhase('streaming') → 输入框禁用 + 显示停止按钮
+    │   └─ 用 partial_text 初始化 assistant 消息气泡
+    │
+    ├─ _handle_chat 继续生成，publish text_delta 到 Redis
+    │   → subscriber 收到 → WS 转发 → 前端增量渲染（实时流式）
+    │
+    ├─ 用户点击停止：
+    │   └─ 发送 { type: "cancel" }
+    │       → 取消 _BACKGROUND_TASKS 中的任务
+    │       → 收到 reply_end { finished_reason: "cancelled" }
+    │
+    └─ 任务自然完成：
+        └─ 收到 reply_end → setPhase('idle')
+```
+
+#### Redis 事件广播（Message Bus）
+
+`_handle_chat` 通过 `_publish_event()` 将每个生成事件广播到 Redis Pub/Sub，与 `ChatService.run()` 使用相同的 channel：
+
+```
+Channel: agentscope:session:{session_id}:events
+```
+
+| 事件类型           | 触发时机      | 携带数据                                   |
+| ------------------ | ------------- | ------------------------------------------ |
+| `text_delta`     | 每个文本增量  | `{ delta }`                              |
+| `thinking_delta` | 每个思考增量  | `{ delta }`                              |
+| `tool_call`      | 工具调用完成  | `{ tool_name, tool_call_id, tool_args }` |
+| `tool_result`    | 工具结果返回  | `{ tool_call_id, state, result }`        |
+| `reply_end`      | 回复完成/中断 | `{ finished_reason, finished }`          |
+
+#### 后台生成保护
+
+断连后任务继续运行，但受以下限制（防止无限运行）：
+
+| 限制                               | 值             | 说明                              |
+| ---------------------------------- | -------------- | --------------------------------- |
+| `REPLY_MAX_DURATION`             | 300s (5 分钟)  | 总时长上限                        |
+| `REPLY_MAX_CHARS`                | 50,000 字符    | 回复字符上限                      |
+| `session_mgr.save_session_reply` | 每 10 个 delta | 增量写入 session meta，重连可拉取 |
+
+#### 前端协议消息
+
+| 消息类型                   | 方向 | 说明                                            |
+| -------------------------- | ---- | ----------------------------------------------- |
+| `generation_in_progress` | S→C | 后台任务仍在运行，携带`partial_text` 已有内容 |
+| `pending_reply`          | S→C | 后台任务已完成，携带完整`text`                |
+| `text_delta`             | S→C | 实时文本增量（重连后通过 Redis 订阅接收）       |
+| `cancel`                 | C→S | 请求终止后台生成任务                            |
+
+### 4. 历史会话恢复
 
 ```
 用户切换到历史会话
@@ -249,7 +335,7 @@ POST /chat/stream 或 POST /chat/
 返回消息列表（user/assistant 角色，跳过 thinking/tool_call）
 ```
 
-### 4. 继续历史对话
+### 5. 继续历史对话
 
 ```
 用户在历史会话中发送新消息
@@ -392,17 +478,28 @@ context:
 ┌──────────┐     ┌──────────┐     ┌──────────────┐
 │  前端    │────►│  API     │────►│ SessionManager│
 │ (多设备) │◄────│  Router  │◄────│              │
-└──────────┘     └──────────┘     └──────┬───────┘
-                                         │
-                    ┌────────────────────┼────────────────────┐
-                    ▼                    ▼                    ▼
-              ┌──────────┐        ┌──────────┐        ┌──────────┐
-              │  内存    │        │  Redis   │        │    PG    │
-              │  缓存    │◄──────►│          │◄──────►│          │
-              └──────────┘        └──────────┘        └──────────┘
-              AgentState          AgentState           conversations
-              SessionEntry        元数据               sessions
-                                  消息总线             agents/mcps/skills
+└────┬─────┘     └──────────┘     └──────┬───────┘
+     │                                    │
+     │  断连后重连：订阅 Redis              │
+     │◄────────────────────────────────────┼──────┐
+     │                                     │      │
+     │  ┌──────────────────────────────────┼───┐  │
+     │  │                                  ▼   │  │
+     │  │  Redis Message Bus (Pub/Sub)         │  │
+     │  │    events channel ←─ _handle_chat    │  │
+     │  │         │                            │  │
+     │  │         └──► subscriber ──► WS 推送 ─┘  │
+     │  └─────────────────────────────────────┘  │
+     │                                           │
+                    ┌────────────────────┼────────┴───────┐
+                    ▼                    ▼                ▼
+              ┌──────────┐        ┌──────────┐      ┌──────────┐
+              │  内存    │        │  Redis   │      │    PG    │
+              │  缓存    │◄──────►│          │◄────►│          │
+              └──────────┘        └──────────┘      └──────────┘
+              AgentState          AgentState          conversations
+              SessionEntry        元数据              sessions
+                                  消息总线            agents/mcps/skills
                                   :status (多端同步)
                                   :control (多端中断)
 ```
@@ -413,6 +510,7 @@ context:
 2. **PG 作为冷存储**：对话历史持久化到 PostgreSQL，支持复杂查询和长期保存
 3. **PG 回填机制**：Redis 未命中时从 PG 加载历史消息，确保会话可恢复
 4. **异步持久化**：对话结束后异步写入存储，不阻塞用户响应
-5. **软删除**：PG 使用 status 字段标记删除，实际删除由数据部门处理
+5. **软删除**：PG 使用 status 字段标记删除，实际删除由数据管理的处理
 6. **Fork 机制**：支持从任意会话创建分支，复制完整上下文
 7. **多端同步**：SessionStatusTracker 通过 Redis 广播会话状态（对讲机模型），设备B发消息时 409 拒绝而非 spin-wait；任意设备可通过 /interrupt 中断当前生成
+8. **断连续生成**：WebSocket 断连后生成任务不中断，通过 Redis Message Bus 持续广播事件；前端重连时先推 `generation_in_progress` 快照，再通过订阅实时续接 `text_delta` 流，支持手动终止

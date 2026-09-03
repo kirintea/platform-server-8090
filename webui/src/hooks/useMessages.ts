@@ -161,6 +161,52 @@ export function useMessages(userId: string, sessionId: string | null) {
 				break;
 			}
 
+			case 'generation_in_progress': {
+				// 后台任务仍在运行，初始化部分内容并进入 streaming 状态
+				const bgPayload = msg.payload as { partial_text?: string };
+				setPhase('streaming');
+				if (bgPayload.partial_text) {
+					setMessages(prev => {
+						const next = [...prev];
+						const last = next[next.length - 1];
+						if (last && last.role === 'assistant' && !last.thinking && !last.toolCalls) {
+							next[next.length - 1] = { ...last, content: bgPayload.partial_text! };
+						} else {
+							next.push({
+								id: `msg-${Date.now()}-bg`,
+								role: 'assistant',
+								content: bgPayload.partial_text!,
+							});
+						}
+						return next;
+					});
+				}
+				break;
+			}
+
+			case 'pending_reply': {
+				// 后台任务已完成（断连期间生成完毕），展示最终回复
+				setPhase('idle');
+				const pendingPayload = msg.payload as { text?: string };
+				if (pendingPayload.text) {
+					setMessages(prev => {
+						const next = [...prev];
+						const last = next[next.length - 1];
+						if (last && last.role === 'assistant') {
+							next[next.length - 1] = { ...last, content: pendingPayload.text! };
+						} else {
+							next.push({
+								id: `msg-${Date.now()}-pending`,
+								role: 'assistant',
+								content: pendingPayload.text!,
+							});
+						}
+						return next;
+					});
+				}
+				break;
+			}
+
 			case 'pong':
 				break;
 		}
