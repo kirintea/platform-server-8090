@@ -23,6 +23,7 @@ from agentscope.event import EventType
 from agentscope.message import Msg, UserMsg
 
 from core.session import SessionManager
+from core.session_status import SessionBusyError, SessionState, SessionStatusTracker
 
 from loguru import logger
 
@@ -68,9 +69,11 @@ class ChatService:
         self,
         session_mgr: SessionManager,
         message_bus: MessageBus,
+        status_tracker: SessionStatusTracker | None = None,
     ) -> None:
         self._session_mgr = session_mgr
         self._bus = message_bus
+        self._status_tracker = status_tracker
 
     async def run(
         self,
@@ -78,6 +81,7 @@ class ChatService:
         session_id: str,
         message: str,
         db=None,
+        device_id: str = "unknown",
     ) -> None:
         """触发一次 chat run（后台执行）
 
@@ -87,13 +91,32 @@ class ChatService:
         与 /chat/stream、/ws/chat 共用同一把 per-(user, session) 运行锁，
         确保同一会话的并发 turn 被串行化（跨传输、跨实例）。
 
+        多端并发：通过 SessionStatusTracker 广播会话状态，
+        设备B发消息时可立即得知"有人在说话"，不再 spin-wait。
+
         Args:
             user_id: 用户 ID
             session_id: 会话 ID
             message: 用户消息
             db: 可选 DatabaseManager，用于 PG 双写；不传则仅写 Redis
+            device_id: 发起请求的设备标识（用于多端状态广播）
         """
         events_key = MessageBusKeys.session_events(session_id)
+
+        # 检查会话是否已被其他设备占用（多端并发）
+        if self._status_tracker:
+            status = await self._status_tracker.get_status(session_id)
+            if status.get("state") == SessionState.GENERATING:
+                await self._publish_event(events_key, {
+                    "type": "busy",
+                    "session_id": session_id,
+                    "owner": status.get("owner", "unknown"),
+                    "started_at": status.get("started_at"),
+                })
+                raise SessionBusyError(
+                    owner=status.get("owner", "unknown"),
+                    started_at=status.get("started_at"),
+                )
 
         # 工具调用缓冲区（与 chat.py / ws_chat.py 保持一致的事件形状）
         pending_tool_calls: dict[str, dict] = {}
@@ -107,6 +130,12 @@ class ChatService:
         # 获取 session lock（确保同一会话不会并发执行，且跨传输共享）
         async with acquire_session_lock(self._bus, user_id, session_id):
             try:
+                # 标记会话为生成中（多端并发状态广播）
+                if self._status_tracker:
+                    await self._status_tracker.set_generating(
+                        session_id, device_id, message,
+                    )
+
                 # 获取或创建 Agent
                 agent = await self._session_mgr.get_or_create(user_id, session_id)
 
@@ -116,16 +145,28 @@ class ChatService:
                 # 对象，refresh_state 直接替换其 state 字段，无需重新获取引用。
                 await self._session_mgr.refresh_state(user_id, session_id)
 
-                # 发布 run_start 事件
+                # 发布 run_start 事件（携带 device_id，供多端观察）
                 await self._publish_event(events_key, {
                     "type": "run_start",
                     "session_id": session_id,
+                    "device_id": device_id,
                 })
 
                 # 执行流式回复
                 user_msg = UserMsg(name="user", content=message)
+                event_count = 0
 
                 async for event in agent.reply_stream(user_msg):
+                    # 每 5 个事件检查一次 cancel 信号（多端中断）
+                    event_count += 1
+                    if self._status_tracker and event_count % 5 == 0:
+                        if await self._status_tracker.should_cancel(session_id):
+                            await self._publish_event(events_key, {
+                                "type": "interrupted",
+                                "reason": "cancel_requested",
+                                "session_id": session_id,
+                            })
+                            break
                     if not hasattr(event, "type"):
                         if isinstance(event, Msg):
                             # 最终回复消息
@@ -236,6 +277,10 @@ class ChatService:
                     "message": str(e),
                 })
             finally:
+                # 标记会话为空闲（多端并发状态广播）
+                if self._status_tracker:
+                    await self._status_tracker.set_idle(session_id)
+
                 # 无论成功 / 异常 / 取消，都持久化 Redis 状态
                 # （含 tool-only / 部分回复，agent state 已被回复过程改变）
                 await self._session_mgr.save(user_id, session_id)

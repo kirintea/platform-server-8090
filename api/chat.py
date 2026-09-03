@@ -33,6 +33,7 @@ from agentscope.message import Msg, UserMsg
 from loguru import logger
 
 from core.chat_service import acquire_session_lock, session_lock_key
+from core.session_status import SessionBusyError, SessionStatusTracker
 from core.token_counter import count_tokens
 from core.validators import coerce_id, is_auth_enabled, require_user_id
 
@@ -137,6 +138,10 @@ class ChatRequest(BaseModel):
         default=None,
         description="会话 ID（不传则自动创建新会话）",
     )
+    device_id: str = Field(
+        default="unknown",
+        description="设备标识（用于多端并发状态广播）",
+    )
 
 
 # ============================================================
@@ -168,11 +173,28 @@ async def chat_stream(request: Request, body: ChatRequest):
     session_mgr = request.app.state.session_manager
     db = getattr(request.app.state, "database_manager", None)
     bus = getattr(request.app.state, "message_bus", None)
+    status_tracker = getattr(request.app.state, "session_status_tracker", None)
 
     # 规范化用户 / 会话标识（防止路径穿越等非法输入）
     user_id = _validate_user_id(request, body.user_id)
     session_id = body.session_id or str(uuid.uuid4())
     session_id = coerce_id(session_id, default=str(uuid.uuid4()))
+    device_id = body.device_id or "unknown"
+
+    # 多端并发：检查会话是否已被其他设备占用
+    if status_tracker:
+        status = await status_tracker.get_status(session_id)
+        if status.get("state") == "generating":
+            return JSONResponse(
+                status_code=409,
+                content={
+                    "error": "session_busy",
+                    "message": "该会话正在处理中",
+                    "owner_device": status.get("owner", "unknown"),
+                    "started_at": status.get("started_at"),
+                    "suggestion": "等待完成或发送中断请求",
+                },
+            )
 
     async def event_generator() -> AsyncGenerator[str, None]:
         # 先发送 session_id，让前端知道当前会话
@@ -197,9 +219,17 @@ async def chat_stream(request: Request, body: ChatRequest):
         try:
             async with lock_ctx:
                 try:
+                    # 标记会话为生成中（多端并发状态广播）
+                    if status_tracker:
+                        await status_tracker.set_generating(
+                            session_id, device_id, body.message,
+                        )
+
                     agent = await session_mgr.get_or_create(user_id, session_id)
                     await session_mgr.refresh_state(user_id, session_id)
                     user_msg = UserMsg(name="user", content=body.message)
+
+                    event_count = 0
 
                     # LLM 超时保护：config.llm.timeout（默认 120s）
                     llm_timeout = getattr(
@@ -209,6 +239,16 @@ async def chat_stream(request: Request, body: ChatRequest):
                     async for event in _stream_with_timeout(
                         agent.reply_stream(user_msg), llm_timeout,
                     ):
+                        # 每 5 个事件检查一次 cancel 信号（多端中断）
+                        event_count += 1
+                        if status_tracker and event_count % 5 == 0:
+                            if await status_tracker.should_cancel(session_id):
+                                yield _sse_event("interrupted", {
+                                    "reason": "cancel_requested",
+                                    "session_id": session_id,
+                                })
+                                break
+
                         if not hasattr(event, "type"):
                             if isinstance(event, Msg):
                                 yield _sse_event("reply_end", {
@@ -300,6 +340,10 @@ async def chat_stream(request: Request, body: ChatRequest):
                             case _:
                                 pass
                 finally:
+                    # 标记会话为空闲（多端并发状态广播）
+                    if status_tracker:
+                        await status_tracker.set_idle(session_id)
+
                     # Redis AgentState 必须在锁内同步落库，避免下一轮 refresh_state
                     # 读取到过期状态导致本轮对话丢失（state-loss race）。
                     await session_mgr.save(user_id, session_id)
@@ -550,6 +594,7 @@ class ChatTriggerRequest(BaseModel):
     message: str = Field(description="用户消息内容")
     user_id: str = Field(default="anonymous", description="用户标识")
     session_id: str | None = Field(default=None, description="会话 ID")
+    device_id: str = Field(default="unknown", description="设备标识")
 
 
 class ChatTriggerResponse(BaseModel):
@@ -713,11 +758,27 @@ async def chat_trigger(request: Request, body: ChatTriggerRequest):
     chat_service = request.app.state.chat_service
     message_bus = request.app.state.message_bus
     db = getattr(request.app.state, "database_manager", None)
+    status_tracker = getattr(request.app.state, "session_status_tracker", None)
 
     # 规范化用户 / 会话标识（防止路径穿越等非法输入）
     user_id = _validate_user_id(request, body.user_id)
     session_id = body.session_id or str(uuid.uuid4())
     session_id = coerce_id(session_id, default=str(uuid.uuid4()))
+    device_id = body.device_id or "unknown"
+
+    # 多端并发：检查会话是否已被其他设备占用
+    if status_tracker:
+        status = await status_tracker.get_status(session_id)
+        if status.get("state") == "generating":
+            return JSONResponse(
+                status_code=409,
+                content={
+                    "error": "session_busy",
+                    "message": "该会话正在处理中",
+                    "owner_device": status.get("owner", "unknown"),
+                    "started_at": status.get("started_at"),
+                },
+            )
 
     # 检查是否已有 run 在执行（与 run() 内部使用的锁 key 一致）
     lock_key = session_lock_key(user_id, session_id)
@@ -729,7 +790,7 @@ async def chat_trigger(request: Request, body: ChatTriggerRequest):
 
     # 后台触发 chat run（传入 db 以进行 PG 双写）
     task = asyncio.create_task(
-        chat_service.run(user_id, session_id, body.message, db)
+        chat_service.run(user_id, session_id, body.message, db, device_id=device_id)
     )
     _PERSIST_TASKS.add(task)
     task.add_done_callback(_PERSIST_TASKS.discard)
@@ -798,3 +859,45 @@ async def session_event_stream(request: Request, session_id: str):
             "X-Accel-Buffering": "no",
         },
     )
+
+
+# ============================================================
+# 多端并发 — 中断与状态端点
+# ============================================================
+
+class InterruptRequest(BaseModel):
+    """中断请求"""
+    device_id: str = Field(default="unknown", description="发起中断的设备标识")
+
+
+@router.post("/sessions/{session_id}/interrupt")
+async def interrupt_session(
+    request: Request,
+    session_id: str,
+    body: InterruptRequest,
+):
+    """请求中断当前生成（任意设备可调用）
+
+    生成者会在下一个事件检查点停止，所有设备收到 interrupted 事件。
+    """
+    session_id = coerce_id(session_id, default=str(uuid.uuid4()))
+    status_tracker = getattr(request.app.state, "session_status_tracker", None)
+    if not status_tracker:
+        raise HTTPException(503, "状态跟踪器未配置")
+
+    success = await status_tracker.request_cancel(session_id, body.device_id)
+    if not success:
+        return {"status": "no_active_generation"}
+
+    return {"status": "cancel_requested"}
+
+
+@router.get("/sessions/{session_id}/status")
+async def get_session_status(request: Request, session_id: str):
+    """查询会话当前状态（idle/generating/interrupting）"""
+    session_id = coerce_id(session_id, default=str(uuid.uuid4()))
+    status_tracker = getattr(request.app.state, "session_status_tracker", None)
+    if not status_tracker:
+        return {"state": "idle"}
+
+    return await status_tracker.get_status(session_id)

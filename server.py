@@ -41,6 +41,7 @@ from core.config import ConfigManager
 from core.database import DatabaseManager
 from core.redis_message_bus import RedisMessageBus
 from core.session import SessionManager
+from core.session_status import SessionStatusTracker
 from core.storage import PostgresStorage
 from core.workspace import LocalWorkspaceManager
 
@@ -234,7 +235,17 @@ def create_app(config) -> FastAPI:
         logger.info("工作区管理器已就绪 (沙箱目录: {})", sandbox_dir)
 
         # 创建 Chat 服务（Fire-and-Forget 模式）
-        chat_service = ChatService(session_mgr, message_bus)
+        # 先初始化 SessionStatusTracker（多端并发状态广播）
+        status_tracker = None
+        if _bus_ok and message_bus._redis:
+            status_tracker = SessionStatusTracker(message_bus._redis)
+            app.state.session_status_tracker = status_tracker
+            logger.info("会话状态跟踪器已就绪（多端并发模式）")
+        else:
+            app.state.session_status_tracker = None
+            logger.info("会话状态跟踪器未启用（Redis 不可用）")
+
+        chat_service = ChatService(session_mgr, message_bus, status_tracker)
         app.state.chat_service = chat_service
         logger.info("Chat 服务已就绪")
 

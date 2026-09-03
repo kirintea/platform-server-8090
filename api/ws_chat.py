@@ -38,6 +38,7 @@ from agentscope.message import Msg, UserMsg
 from loguru import logger
 
 from core.chat_service import acquire_session_lock
+from core.session_status import SessionBusyError, SessionState, SessionStatusTracker
 from core.validators import coerce_id, coerce_id_strict, is_auth_enabled
 
 router = APIRouter()
@@ -121,13 +122,15 @@ async def websocket_chat(
     ws: WebSocket,
     user_id: str = "anonymous",
     session_id: str | None = None,
+    device_id: str = "unknown",
 ):
-    """WebSocket 流式对话端点
+    """WebSocket 流式对话端点（支持多端并发观察者模式）
 
     Args:
         ws: WebSocket 连接
         user_id: 用户标识（query param）
         session_id: 会话 ID（可选，不传则自动创建）
+        device_id: 设备标识（query param，用于多端状态广播）
     """
     await ws.accept()
     # 规范化用户 / 会话标识（防止路径穿越等非法输入）
@@ -172,85 +175,182 @@ async def websocket_chat(
     # 获取服务实例
     session_mgr = ws.app.state.session_manager
     db = getattr(ws.app.state, "database_manager", None)
+    message_bus = getattr(ws.app.state, "message_bus", None)
+    status_tracker = getattr(ws.app.state, "session_status_tracker", None)
 
     # 发送连接确认
     await _send_json(ws, "connected", {
         "session_id": session_id,
         "user_id": user_id,
+        "device_id": device_id,
     })
 
-    logger.info("WebSocket 连接建立: user={} session={}", user_id, session_id)
+    logger.info("WebSocket 连接建立: user={} session={} device={}", user_id, session_id, device_id)
 
     # 当前正在执行的生成任务（用于 cancel）
     current_task: asyncio.Task | None = None
     # 取消标志
     cancelled = asyncio.Event()
 
+    # --- 观察者模式：订阅 session 事件流（后台任务） ---
+    from agentscope.app.message_bus import MessageBusKeys
+    events_key = MessageBusKeys.session_events(session_id)
+    event_queue: asyncio.Queue[dict | None] = asyncio.Queue()
+
+    async def _session_event_subscriber() -> None:
+        """后台订阅 Redis Pub/Sub，将 session 事件转发到 WebSocket 事件队列"""
+        if not message_bus:
+            return
+        try:
+            async for evt in message_bus.subscribe(events_key):
+                await event_queue.put(
+                    {k: v for k, v in evt.items() if k != "_entry_id"},
+                )
+        except asyncio.CancelledError:
+            pass
+        finally:
+            await event_queue.put(None)
+
+    subscriber_task = asyncio.create_task(_session_event_subscriber())
+
     try:
         while True:
-            data = await ws.receive_json()
-            msg_type = data.get("type", "")
+            # 同时等待用户消息和 session 事件（观察者模式核心）
+            ws_task = asyncio.create_task(ws.receive_json())
+            evt_task = asyncio.create_task(event_queue.get())
 
-            if msg_type == "chat":
-                # 防止并发生成
-                if current_task and not current_task.done():
+            done, pending = await asyncio.wait(
+                [ws_task, evt_task],
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            # 取消未完成的等待
+            for p in pending:
+                p.cancel()
+
+            for task in done:
+                data = task.result()
+
+                if data is None:
+                    # event_queue 返回 None，连接关闭
+                    continue
+
+                # 判断是 session 事件还是 WebSocket 消息
+                if task is evt_task:
+                    # 从 Redis 收到的 session 事件（观察者模式）
+                    evt = data
+                    evt_type = evt.get("type", "")
+                    # 如果是其他设备发起的 run_start，通知前端
+                    if evt_type == "run_start" and evt.get("device_id") != device_id:
+                        await _send_json(ws, "other_device_active", {
+                            "device_id": evt.get("device_id"),
+                            "message": "其他设备正在生成回复",
+                        })
+                    # 转发所有事件给前端
+                    await _send_json(ws, evt_type, evt)
+                    continue
+
+                # WebSocket 消息
+                msg_type = data.get("type", "")
+
+                if msg_type == "chat":
+                    # 防止并发生成
+                    if current_task and not current_task.done():
+                        await _send_json(ws, "error", {
+                            "message": "上一轮对话尚未结束，请等待完成或发送 cancel",
+                        })
+                        continue
+
+                    # 多端并发：检查会话是否已被其他设备占用
+                    if status_tracker:
+                        status = await status_tracker.get_status(session_id)
+                        if status.get("state") == SessionState.GENERATING:
+                            await _send_json(ws, "busy", {
+                                "owner": status.get("owner", "unknown"),
+                                "started_at": status.get("started_at"),
+                                "message": "其他设备正在回复中，请等待或发送 interrupt",
+                            })
+                            continue
+
+                    message = data.get("payload", {}).get("message", "")
+                    if not message:
+                        await _send_json(ws, "error", {"message": "消息不能为空"})
+                        continue
+
+                    # 重置取消标志
+                    cancelled.clear()
+
+                    # 启动生成任务
+                    current_task = asyncio.create_task(
+                        _handle_chat(
+                            ws, session_mgr, db, user_id, session_id, message,
+                            cancelled, device_id=device_id,
+                            status_tracker=status_tracker,
+                        )
+                    )
+
+                elif msg_type == "cancel":
+                    if current_task and not current_task.done():
+                        cancelled.set()
+                        current_task.cancel()
+                        try:
+                            await current_task
+                        except (asyncio.CancelledError, Exception):
+                            pass
+                        await _send_json(ws, "reply_end", {
+                            "finished_reason": "cancelled",
+                            "finished": True,
+                        })
+                        logger.info("WebSocket 取消生成: user={} session={}", user_id, session_id)
+                    current_task = None
+
+                elif msg_type == "interrupt":
+                    # 多端中断：任意设备可发送 interrupt 请求
+                    if status_tracker:
+                        success = await status_tracker.request_cancel(
+                            session_id, device_id,
+                        )
+                        if success:
+                            await _send_json(ws, "interrupt_requested", {
+                                "status": "cancel_requested",
+                            })
+                        else:
+                            await _send_json(ws, "interrupt_requested", {
+                                "status": "no_active_generation",
+                            })
+                    else:
+                        await _send_json(ws, "error", {
+                            "message": "状态跟踪器未配置",
+                        })
+
+                elif msg_type == "ping":
+                    await _send_json(ws, "pong")
+
+                elif msg_type == "auth":
+                    # 认证帧：未启用认证时到达此处说明是客户端冗余发送，忽略即可。
+                    continue
+
+                else:
                     await _send_json(ws, "error", {
-                        "message": "上一轮对话尚未结束，请等待完成或发送 cancel",
+                        "message": f"未知消息类型: {msg_type}",
                     })
-                    continue
-
-                message = data.get("payload", {}).get("message", "")
-                if not message:
-                    await _send_json(ws, "error", {"message": "消息不能为空"})
-                    continue
-
-                # 重置取消标志
-                cancelled.clear()
-
-                # 启动生成任务
-                current_task = asyncio.create_task(
-                    _handle_chat(ws, session_mgr, db, user_id, session_id, message, cancelled)
-                )
-
-            elif msg_type == "cancel":
-                if current_task and not current_task.done():
-                    cancelled.set()
-                    current_task.cancel()
-                    try:
-                        await current_task
-                    except (asyncio.CancelledError, Exception):
-                        pass
-                    await _send_json(ws, "reply_end", {
-                        "finished_reason": "cancelled",
-                        "finished": True,
-                    })
-                    logger.info("WebSocket 取消生成: user={} session={}", user_id, session_id)
-                current_task = None
-
-            elif msg_type == "ping":
-                await _send_json(ws, "pong")
-
-            elif msg_type == "auth":
-                # 认证帧：未启用认证时到达此处说明是客户端冗余发送，忽略即可。
-                continue
-
-            else:
-                await _send_json(ws, "error", {
-                    "message": f"未知消息类型: {msg_type}",
-                })
 
     except WebSocketDisconnect:
         logger.info("WebSocket 断开: user={} session={}", user_id, session_id)
     except Exception:
         logger.exception("WebSocket 异常: user={} session={}", user_id, session_id)
     finally:
-        # 清理：取消正在执行的任务
+        # 清理：取消正在执行的任务和事件订阅
         if current_task and not current_task.done():
             current_task.cancel()
             try:
                 await current_task
             except (asyncio.CancelledError, Exception):
                 pass
+        subscriber_task.cancel()
+        try:
+            await subscriber_task
+        except (asyncio.CancelledError, Exception):
+            pass
         logger.info("WebSocket 连接关闭: user={} session={}", user_id, session_id)
 
 
@@ -262,8 +362,10 @@ async def _handle_chat(
     session_id: str,
     message: str,
     cancelled: asyncio.Event,
+    device_id: str = "unknown",
+    status_tracker: SessionStatusTracker | None = None,
 ) -> None:
-    """处理单轮对话的流式回复"""
+    """处理单轮对话的流式回复（支持多端并发状态广播）"""
     # 先初始化缓冲区，确保 finally 中始终可用（即使 turn 提前异常/取消）
     pending_tool_calls: dict[str, dict] = {}
     pending_tool_results: dict[str, str] = {}
@@ -281,6 +383,12 @@ async def _handle_chat(
     try:
         async with lock_ctx:
             try:
+                # 标记会话为生成中（多端并发状态广播）
+                if status_tracker:
+                    await status_tracker.set_generating(
+                        session_id, device_id, message,
+                    )
+
                 agent = await session_mgr.get_or_create(user_id, session_id)
                 # 多实例场景：强制刷新状态
                 await session_mgr.refresh_state(user_id, session_id)
@@ -292,12 +400,24 @@ async def _handle_chat(
                     getattr(ws.app.state.config, "llm", None),
                     "timeout", 120,
                 )
+                event_count = 0
+
                 async for event in _stream_with_timeout(
                     agent.reply_stream(user_msg), llm_timeout,
                 ):
                     # 检查取消
                     if cancelled.is_set():
                         break
+
+                    # 每 5 个事件检查一次 cancel 信号（多端中断）
+                    event_count += 1
+                    if status_tracker and event_count % 5 == 0:
+                        if await status_tracker.should_cancel(session_id):
+                            await _send_json(ws, "interrupted", {
+                                "reason": "cancel_requested",
+                                "session_id": session_id,
+                            })
+                            break
 
                     if not hasattr(event, "type"):
                         if isinstance(event, Msg):
@@ -385,6 +505,10 @@ async def _handle_chat(
                         case _:
                             pass
             finally:
+                # 标记会话为空闲（多端并发状态广播）
+                if status_tracker:
+                    await status_tracker.set_idle(session_id)
+
                 # Redis AgentState 必须在锁内同步落库，避免下一轮 refresh_state
                 # 读取到过期状态导致本轮对话丢失（state-loss race）。
                 await session_mgr.save(user_id, session_id)
