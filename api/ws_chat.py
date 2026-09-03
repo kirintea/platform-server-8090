@@ -294,10 +294,15 @@ async def websocket_chat(
                 msg_type = data.get("type", "")
 
                 if msg_type == "chat":
-                    # 防止并发生成
+                    # 防止并发生成（当前连接 + 上一连接遗留的后台任务）
                     if current_task and not current_task.done():
                         await _send_json(ws, "error", {
                             "message": "上一轮对话尚未结束，请等待完成或发送 cancel",
+                        })
+                        continue
+                    if bg_key in _BACKGROUND_TASKS and not _BACKGROUND_TASKS[bg_key].done():
+                        await _send_json(ws, "error", {
+                            "message": "上一轮回复仍在后台生成中，请等待完成或发送 cancel",
                         })
                         continue
 
