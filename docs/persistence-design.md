@@ -62,6 +62,8 @@
 ```
 agentscope:session:{user_id}:{session_id}        → AgentState JSON (TTL 1800s)
 agentscope:session:{user_id}:{session_id}:meta   → 会话元数据 JSON (TTL 1800s)
+agentscope:session:{session_id}:status           → 会话实时状态 JSON (TTL 300s)  ← 多端同步
+agentscope:session:{session_id}:control          → cancel 指令 JSON (TTL 60s)     ← 多端同步
 ```
 
 ### AgentState 内容
@@ -97,6 +99,29 @@ agentscope:session:{user_id}:{session_id}:meta   → 会话元数据 JSON (TTL 1
   "message_count": 4,
   "parent_session_id": null,
   "forked_at": null
+}
+```
+
+### 会话实时状态（多端同步）
+
+用于多端并发场景，设备B发消息时可立即得知"有人在说话"（不 spin-wait）。
+
+```json
+// agentscope:session:{session_id}:status
+{
+  "state": "generating",      // idle | generating | interrupting
+  "owner": "web-a1b2c3-phone", // 持有者设备标识
+  "started_at": 1693123456.789,
+  "user_msg_preview": "帮我写一个..."
+}
+```
+
+```json
+// agentscope:session:{session_id}:control
+{
+  "action": "cancel",         // 取消指令
+  "from": "web-d4e5f6-desktop", // 发起取消的设备
+  "at": 1693123460.123
 }
 ```
 
@@ -171,10 +196,18 @@ SessionManager.get_or_create()
 ### 2. 对话流程
 
 ```
-用户发送消息
+用户发送消息（含 device_id）
     │
     ▼
 POST /chat/stream 或 POST /chat/
+    │
+    ├─ 【多端同步】检查 SessionStatusTracker
+    │   ├─ generating → 返回 409 Conflict（设备B告知"有人在说话"）
+    │   └─ idle → 继续
+    │
+    ├─ 获取分布式锁（acquire_session_lock）
+    │
+    ├─ 【多端同步】标记 set_generating(session_id, device_id)
     │
     ├─ 获取/创建 Agent（get_or_create）
     │
@@ -184,9 +217,12 @@ POST /chat/stream 或 POST /chat/
     │   │
     │   ├─ 流式输出 text_delta / thinking_delta
     │   ├─ 工具调用 tool_call / tool_result
+    │   ├─ 【多端同步】每 5 个事件检查 should_cancel() → 中断
     │   └─ 回复完成 reply_end
     │
     └─ 持久化（异步，不阻塞响应）
+        │
+        ├─ 【多端同步】标记 set_idle(session_id)
         │
         ├─ Redis: session_mgr.save()
         │   ├─ 序列化 AgentState → Redis
@@ -355,7 +391,7 @@ context:
 ```
 ┌──────────┐     ┌──────────┐     ┌──────────────┐
 │  前端    │────►│  API     │────►│ SessionManager│
-│          │◄────│  Router  │◄────│              │
+│ (多设备) │◄────│  Router  │◄────│              │
 └──────────┘     └──────────┘     └──────┬───────┘
                                          │
                     ┌────────────────────┼────────────────────┐
@@ -367,6 +403,8 @@ context:
               AgentState          AgentState           conversations
               SessionEntry        元数据               sessions
                                   消息总线             agents/mcps/skills
+                                  :status (多端同步)
+                                  :control (多端中断)
 ```
 
 ## 关键设计决策
@@ -377,3 +415,4 @@ context:
 4. **异步持久化**：对话结束后异步写入存储，不阻塞用户响应
 5. **软删除**：PG 使用 status 字段标记删除，实际删除由数据部门处理
 6. **Fork 机制**：支持从任意会话创建分支，复制完整上下文
+7. **多端同步**：SessionStatusTracker 通过 Redis 广播会话状态（对讲机模型），设备B发消息时 409 拒绝而非 spin-wait；任意设备可通过 /interrupt 中断当前生成
