@@ -59,15 +59,15 @@ _TOOL_PATH_KEYS: dict[str, str] = {
 
 # 工具名 → agentscope 模块路径
 _TOOL_IMPORT_MAP: dict[str, str] = {
-    "Read": "agentscope.tool._built_in.Read",
-    "Write": "agentscope.tool._built_in.Write",
-    "Edit": "agentscope.tool._built_in.Edit",
-    "Glob": "agentscope.tool._built_in.Glob",
-    "Grep": "agentscope.tool._built_in.Grep",
-    "TaskCreate": "agentscope.tool._built_in.TaskCreate",
-    "TaskList": "agentscope.tool._built_in.TaskList",
-    "TaskGet": "agentscope.tool._built_in.TaskGet",
-    "TaskUpdate": "agentscope.tool._built_in.TaskUpdate",
+    "Read": "agentscope.tool._builtin.Read",
+    "Write": "agentscope.tool._builtin.Write",
+    "Edit": "agentscope.tool._builtin.Edit",
+    "Glob": "agentscope.tool._builtin.Glob",
+    "Grep": "agentscope.tool._builtin.Grep",
+    "TaskCreate": "agentscope.tool._builtin.TaskCreate",
+    "TaskList": "agentscope.tool._builtin.TaskList",
+    "TaskGet": "agentscope.tool._builtin.TaskGet",
+    "TaskUpdate": "agentscope.tool._builtin.TaskUpdate",
 }
 
 
@@ -94,8 +94,8 @@ class DockerSandboxProxy(MiddlewareBase):
                 self._container_name,
             )
             logger.info(
-                "DockerSandboxProxy 已初始化: container=%s (status=%s), "
-                "host_root=%s, container_root=%s",
+                "DockerSandboxProxy 已初始化: container={} (status={}), "
+                "host_root={}, container_root={}",
                 self._container_name,
                 self._container.status,
                 self._host_project_root,
@@ -103,14 +103,14 @@ class DockerSandboxProxy(MiddlewareBase):
             )
         except docker.errors.NotFound:
             logger.warning(
-                "DockerSandboxProxy: 沙箱容器 '%s' 不存在，"
+                "DockerSandboxProxy: 沙箱容器 '{}' 不存在，"
                 "沙箱执行将降级到本地。请先启动沙箱容器: "
                 "docker compose -f docker-compose.sandbox.yml up -d sandbox",
                 self._container_name,
             )
         except docker.errors.DockerException as e:
             logger.warning(
-                "DockerSandboxProxy: 无法连接 Docker daemon: %s。"
+                "DockerSandboxProxy: 无法连接 Docker daemon: {}。"
                 "沙箱执行将降级到本地。",
                 e,
             )
@@ -154,14 +154,14 @@ class DockerSandboxProxy(MiddlewareBase):
         # 沙箱容器不可用时的处理
         if self._container is None:
             if not self._fallback_to_local:
-                logger.error("沙箱容器不可用且禁止降级到本地执行: %s", tool_name)
+                logger.error("沙箱容器不可用且禁止降级到本地执行: {}", tool_name)
                 yield ToolResponse(
                     id=tool_call.id,
                     content=[TextBlock(text="[Sandbox] 沙箱容器不可用，且配置禁止降级到本地执行 (fallback_to_local=false)")],
                     state=ToolResultState.DENIED,
                 )
                 return
-            logger.warning("沙箱容器不可用，降级到本地执行: %s", tool_name)
+            logger.warning("沙箱容器不可用，降级到本地执行: {}", tool_name)
             async for item in next_handler(**input_kwargs):
                 yield item
             return
@@ -171,14 +171,14 @@ class DockerSandboxProxy(MiddlewareBase):
             yield response
         except Exception as e:
             if not self._fallback_to_local:
-                logger.error("沙箱执行失败且禁止降级到本地: %s", e)
+                logger.error("沙箱执行失败且禁止降级到本地: {}", e)
                 yield ToolResponse(
                     id=tool_call.id,
                     content=[TextBlock(text=f"[Sandbox] 沙箱执行失败，且配置禁止降级到本地: {e}")],
                     state=ToolResultState.DENIED,
                 )
                 return
-            logger.error("沙箱执行失败，降级到本地执行: %s", e)
+            logger.error("沙箱执行失败，降级到本地执行: {}", e)
             async for item in next_handler(**input_kwargs):
                 yield item
 
@@ -205,7 +205,7 @@ class DockerSandboxProxy(MiddlewareBase):
         # 翻译命令中的绝对路径
         command = self._translate_command_paths(command)
 
-        logger.debug("Sandbox Bash: %s", command[:200])
+        logger.debug("Sandbox Bash: {}", command[:200])
         exit_code, output = self._container.exec_run(  # type: ignore
             ["bash", "-c", command],
             workdir=self._container_project_root,
@@ -222,7 +222,7 @@ class DockerSandboxProxy(MiddlewareBase):
         return ToolResponse(
             id=tool_call.id,
             content=[TextBlock(text=result_text or "(无输出)")],
-            state=ToolResultState.OK,
+            state=ToolResultState.SUCCESS,
         )
 
     def _exec_python_tool(self, tool_name: str, tool_call: Any) -> ToolResponse:
@@ -250,18 +250,23 @@ class DockerSandboxProxy(MiddlewareBase):
                 except (json.JSONDecodeError, TypeError):
                     pass
 
-        # 构建 Python 执行脚本
+        # 构建 Python 执行脚本（工具为 async，需 asyncio.run）
         module_path, class_name = import_path.rsplit(".", 1)
         script = textwrap.dedent(f"""\
-            import json, sys
+            import asyncio, json, sys
             sys.path.insert(0, '{self._container_project_root}')
             from {module_path} import {class_name}
             tool = {class_name}()
-            result = tool(**json.loads({json.dumps(input_str)}))
-            print(json.dumps(result, ensure_ascii=False, default=str))
+            result = asyncio.run(tool(**json.loads({json.dumps(input_str)})))
+            # ToolChunk → 提取文本内容
+            if hasattr(result, 'content'):
+                texts = [b.text for b in result.content if hasattr(b, 'text')]
+                print('\\n'.join(texts) if texts else 'OK')
+            else:
+                print(json.dumps(result, ensure_ascii=False, default=str))
         """)
 
-        logger.debug("Sandbox %s: input=%s", tool_name, input_str[:200])
+        logger.debug("Sandbox {}: input={}", tool_name, input_str[:200])
         exit_code, output = self._container.exec_run(  # type: ignore
             ["python3", "-c", script],
             workdir=self._container_project_root,
@@ -275,10 +280,10 @@ class DockerSandboxProxy(MiddlewareBase):
             return ToolResponse(
                 id=tool_call.id,
                 content=[TextBlock(text=stdout.strip() or "OK")],
-                state=ToolResultState.OK,
+                state=ToolResultState.SUCCESS,
             )
 
-        logger.warning("Sandbox %s 失败: %s", tool_name, stderr[:500])
+        logger.warning("Sandbox {} 失败: {}", tool_name, stderr[:500])
         return ToolResponse(
             id=tool_call.id,
             content=[TextBlock(text=stderr.strip() or "执行失败")],

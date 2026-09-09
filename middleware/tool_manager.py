@@ -78,7 +78,7 @@ class ToolManagerMiddleware:
                 continue
             tool_cls = self.BUILTIN_TOOL_MAP.get(name)
             if tool_cls is None:
-                logger.warning("未知内置工具: %s，跳过", name)
+                logger.warning("未知内置工具: {}，跳过", name)
                 continue
             tools.append(tool_cls())
 
@@ -89,10 +89,10 @@ class ToolManagerMiddleware:
             try:
                 tools.append(self._load_custom_tool(ct))
             except Exception:
-                logger.exception("加载自定义工具失败: %s", ct.get("name", ct))
+                logger.exception("加载自定义工具失败: {}", ct.get("name", ct))
 
         logger.info(
-            "ToolManager: 加载 %d 个工具 (%d 内置 + %d 自定义)",
+            "ToolManager: 加载 {} 个工具 ({} 内置 + {} 自定义)",
             len(tools),
             sum(1 for t in tools if type(t) in self.BUILTIN_TOOL_MAP.values()),
             len(tools) - sum(1 for t in tools if type(t) in self.BUILTIN_TOOL_MAP.values()),
@@ -107,7 +107,7 @@ class ToolManagerMiddleware:
     def _load_yaml(path: Path) -> dict[str, Any]:
         """加载 YAML 配置文件"""
         if not path.exists():
-            logger.warning("工具配置文件不存在: %s，使用空配置", path)
+            logger.warning("工具配置文件不存在: {}，使用空配置", path)
             return {}
         with open(path, encoding="utf-8") as f:
             data = yaml.safe_load(f)

@@ -58,8 +58,8 @@ services:
     <<: *sandbox-image
     container_name: platform-sandbox
     volumes:
-      # 只挂载沙箱工作目录，不挂载项目代码
-      - sandbox_workspaces:/workspace/workspaces
+      # 绑定挂载宿主机 workspaces/，与 app 容器共享同一目录
+      - ./workspaces:/workspace/workspaces
     stdin_open: true
     tty: true
     environment:
@@ -70,10 +70,6 @@ services:
     restart: unless-stopped
     networks:
       - platform-net
-
-volumes:
-  sandbox_workspaces:
-    name: platform_sandbox_workspaces
 
 networks:
   platform-net:

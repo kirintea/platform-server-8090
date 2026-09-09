@@ -80,7 +80,7 @@ class PathGuardMiddleware(MiddlewareBase):
         self._sandbox_dir = sandbox_dir
         self._sandbox_resolved = Path(sandbox_dir).resolve()
         logger.info(
-            "PathGuard 已初始化: sandbox=%s (resolved=%s)",
+            "PathGuard 已初始化: sandbox={} (resolved={})",
             sandbox_dir,
             self._sandbox_resolved,
         )
@@ -126,7 +126,7 @@ class PathGuardMiddleware(MiddlewareBase):
                     yield item
                 return
             logger.warning(
-                "PathGuard 拦截 %s: 命令中路径 '%s' 超出沙箱范围 (sandbox=%s)",
+                "PathGuard 拦截 {}: 命令中路径 '{}' 超出沙箱范围 (sandbox={})",
                 tool_name, bad_path, self._sandbox_resolved,
             )
             yield ToolResponse(
@@ -163,7 +163,7 @@ class PathGuardMiddleware(MiddlewareBase):
 
         # 路径越界 — 拦截
         logger.warning(
-            "PathGuard 拦截 %s: 路径 '%s' 超出沙箱范围 (sandbox=%s)",
+            "PathGuard 拦截 {}: 路径 '{}' 超出沙箱范围 (sandbox={})",
             tool_name, path_value, self._sandbox_resolved,
         )
         yield ToolResponse(
