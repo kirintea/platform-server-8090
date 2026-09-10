@@ -244,16 +244,9 @@ database:
 
 | 文档 | 说明 |
 |------|------|
-| [docs/agentscope-guide.md](docs/agentscope-guide.md) | AgentScope API 速查与使用指南 |
-| [docs/development-guide.md](docs/development-guide.md) | 开发指南 |
-| [docs/deployment-guide.md](docs/deployment-guide.md) | 部署与运维指南 |
-| [docs/persistence-design.md](docs/persistence-design.md) | 会话持久化设计 |
-| [docs/health-check-plan.md](docs/health-check-plan.md) | 健康检查工具规划 |
-| [docs/refactor-plan.md](docs/refactor-plan.md) | main.py 拆分重构规划 |
-| [docs/webui-plan.md](docs/webui-plan.md) | 新版 WebUI 设计 |
-| [docs/websocket-plan.md](docs/websocket-plan.md) | WebSocket 通道设计 |
-| [docs/sandbox-plan.md](docs/sandbox-plan.md) | 沙箱隔离设计 |
-| [docs/tool-middleware-plan.md](docs/tool-middleware-plan.md) | 工具守卫设计 |
 | [docs/dangerous-commands.md](docs/dangerous-commands.md) | 命令安全守卫说明 |
+| [docs/middleware-guards.md](docs/middleware-guards.md) | 中间件守卫体系（工具守卫 / 命令守卫 / 路径守卫 / 压缩守卫 / 速率限制） |
+| [docs/budget-control.md](docs/budget-control.md) | 预算控制（回复预算 / 上下文压缩 / 回填预算） |
+| [docs/上下文管理.md](docs/上下文管理.md) | 上下文注入、压缩与卸载 |
 | [docs/docker-deployment.md](docs/docker-deployment.md) | Docker 容器化部署指南 |
 | [docs/sandbox-guide.md](docs/sandbox-guide.md) | 沙箱隔离指南 |

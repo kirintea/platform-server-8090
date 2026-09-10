@@ -179,7 +179,7 @@ class CommandGuardMiddleware(MiddlewareBase):
             return
 
         logger.info(
-            "CommandGuard [%s] 拦截 %s: %s",
+            "CommandGuard [{}] 拦截 {}: {}",
             self._mode, tool_call.name, command[:200],
         )
         yield ToolResponse(

@@ -74,7 +74,7 @@ class ToolGuardMiddleware(MiddlewareBase):
             return
 
         logger.info(
-            "ToolGuard [%s] 拦截工具: %s", self._mode, tool_name,
+            "ToolGuard [{}] 拦截工具: {}", self._mode, tool_name,
         )
         yield ToolResponse(
             id=tool_call.id,
