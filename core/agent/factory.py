@@ -275,13 +275,24 @@ class AgentFactory:
                     command=cfg.command,
                     args=cfg.args or None,
                 )
-                clients.append(MCPClient(config=mcp_config)) # type: ignore
+                # STDIO 必须有状态（长连接子进程）
+                clients.append(MCPClient(mcp_config=mcp_config, name=cfg.name, is_stateful=True))
             elif cfg.transport == "http" and cfg.url:
+                # 过滤空值 header，避免发送 "Bearer " 等无效认证头
+                raw_headers = cfg.headers or {}
+                headers = {k: v for k, v in raw_headers.items() if v}
+                dropped = [k for k in raw_headers if k not in headers]
+                if dropped:
+                    logger.warning(
+                        "MCP '{}' headers 已被过滤（值为空，可能缺少环境变量）: {}",
+                        cfg.name, dropped,
+                    )
                 mcp_config = HttpMCPConfig(
                     url=cfg.url,
-                    headers=cfg.headers or None,
+                    headers=headers or None,
                 )
-                clients.append(MCPClient(config=mcp_config)) # type: ignore
+                # HTTP 用无状态模式，每次调用自动创建临时会话，无需手动 connect()
+                clients.append(MCPClient(mcp_config=mcp_config, name=cfg.name, is_stateful=False))
         return clients
 
     @staticmethod
