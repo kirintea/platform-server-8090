@@ -9,14 +9,10 @@
 # 重建镜像:   docker compose -f docker-compose.sandbox.yml build
 
 x-app-image: &app-image
-  build:
-    context: .
-    dockerfile: Dockerfile
+  image: platform-server-8090:0.1.0
 
 x-sandbox-image: &sandbox-image
-  build:
-    context: .
-    dockerfile: Dockerfile.sandbox
+  image: platform-server-8090-sandbox:0.1.0
 
 services:
   # ============================================================
@@ -25,6 +21,7 @@ services:
   app:
     <<: *app-image
     container_name: platform-server-8090
+    command: ["sleep", "infinity"]
     ports:
       - "8090:8090"
     volumes:

@@ -2,10 +2,10 @@
 
 ## 项目概述
 
-基于 **AgentScope 2.0.5** 构建的 AI Agent 平台服务，使用 FastAPI 提供 HTTP 接口。
+基于 **AgentScope 2.0.7** 构建的 AI Agent 平台服务，使用 FastAPI 提供 HTTP 接口。
 
 - **Python**: >=3.12
-- **核心依赖**: agentscope 2.0.5, fastapi, uvicorn, dashscope, openai, anthropic
+- **核心依赖**: agentscope 2.0.7, fastapi, uvicorn, dashscope, openai, anthropic
 - **详细文档**: [docs/agentscope-guide.md](docs/agentscope-guide.md)
 
 ## 项目结构

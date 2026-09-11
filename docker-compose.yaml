@@ -11,9 +11,7 @@
 
 services:
   app:
-    build:
-      context: .
-      dockerfile: Dockerfile
+    image: platform-server-8090:0.1.0
     container_name: platform-server-8090
     ports:
       - "8090:8090"
