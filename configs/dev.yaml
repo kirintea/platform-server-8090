@@ -107,11 +107,16 @@ agent:
 
 # MCP 服务列表 (可选)
 mcp_servers:
-  - name: "mind-map-mcp"
+  - name: "baidu-maps"
     transport: "http"
-    url: "https://mcp.api-inference.modelscope.net/13750357b87b44/mcp"
+    url: "https://mcp.api-inference.modelscope.net/20cc3a3b3d6740/mcp"
     headers:
-      Authorization: "Bearer ${MODELSCOPE_API_KEY:-}"
+      Authorization: "Bearer ${BAIDU_MAPS_API_KEY:-}"
+  - name: "market-cmgjmcp00074997"
+    transport: "http"
+    url: "https://dashscope.aliyuncs.com/api/v1/mcps/market-cmgjmcp00074997/mcp"
+    headers:
+      Authorization: "Bearer ${DASHSCOPE_API_KEY:-}"
   # - name: "filesystem"
   #   transport: "stdio"
   #   command: "npx"

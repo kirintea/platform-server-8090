@@ -142,7 +142,7 @@ class MCPRecord(_RecordBase):
 
     user_id: str = Field(description="所属用户 ID")
     name: str = Field(description="MCP 名称（唯一）")
-    transport: str = Field(default="stdio", description="传输方式: stdio / http")
+    transport: str = Field(default="stdio", description="传输方式: stdio / http / streamableHttp / streamable_http")
     command: str | None = Field(default=None, description="stdio 命令")
     args: list[str] = Field(default_factory=list, description="stdio 参数")
     url: str | None = Field(default=None, description="HTTP MCP 地址")

@@ -62,7 +62,7 @@ class AgentFactory:
         model = AgentFactory._create_model(config.llm)
 
         # 1.1 接入精确 Token 计数（core.token_counter.count_tokens）
-        # NOTE: agentscope 2.0.5 的 ContextConfig / OpenAIChatModel 是否接受
+        # NOTE: agentscope 2.0.7 的 ContextConfig / OpenAIChatModel 是否接受
         # token_counter 回调需在实际环境中核实。此处仅做防御性接入与可导入性冒烟，
         # 若 API 不支持则静默降级，不影响 agent 创建。
         try:
@@ -259,6 +259,13 @@ class AgentFactory:
         except Exception:
             pass  # skills 目录不存在时忽略
 
+        logger.info(
+            "Toolkit 组装完成: {} 内置工具, {} MCP 客户端, {} Skill 加载器",
+            len(tools), len(mcp_clients), len(skill_loaders),
+        )
+        if mcp_clients:
+            logger.info("MCP 客户端: {}", [c.name for c in mcp_clients])
+
         return Toolkit(
             tools=tools,
             mcps=mcp_clients or None,
@@ -277,7 +284,7 @@ class AgentFactory:
                 )
                 # STDIO 必须有状态（长连接子进程）
                 clients.append(MCPClient(mcp_config=mcp_config, name=cfg.name, is_stateful=True))
-            elif cfg.transport == "http" and cfg.url:
+            elif cfg.transport in ("http", "streamableHttp", "streamable_http") and cfg.url:
                 # 过滤空值 header，避免发送 "Bearer " 等无效认证头
                 raw_headers = cfg.headers or {}
                 headers = {k: v for k, v in raw_headers.items() if v}
@@ -291,8 +298,13 @@ class AgentFactory:
                     url=cfg.url,
                     headers=headers or None,
                 )
-                # HTTP 用无状态模式，每次调用自动创建临时会话，无需手动 connect()
-                clients.append(MCPClient(mcp_config=mcp_config, name=cfg.name, is_stateful=False))
+                # HTTP 类型统一用无状态模式，每次调用自动创建临时会话
+                is_stateful = False
+                logger.info(
+                    "MCP '{}': transport={}, is_stateful={}",
+                    cfg.name, cfg.transport, is_stateful,
+                )
+                clients.append(MCPClient(mcp_config=mcp_config, name=cfg.name, is_stateful=is_stateful))
         return clients
 
     @staticmethod

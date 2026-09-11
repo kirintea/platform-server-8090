@@ -190,7 +190,7 @@ class AgentConfig(BaseModel):
 class MCPConfig(BaseModel):
     """单个 MCP 服务配置"""
     name: str = Field(description="MCP 服务名称")
-    transport: str = Field(default="stdio", description="传输方式: stdio / http")
+    transport: str = Field(default="stdio", description="传输方式: stdio / http / streamableHttp / streamable_http")
     # stdio 模式
     command: str | None = Field(default=None, description="stdio 命令")
     args: list[str] = Field(default_factory=list, description="stdio 参数")
