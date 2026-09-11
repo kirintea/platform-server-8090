@@ -1,6 +1,27 @@
 # AgentScope Platform Server
 
-基于 **AgentScope 2.0.7** 构建的对话智能体平台，提供多用户会话管理、流式输出、工具调用、可观测性等能力。
+用 AgentScope 2.0.7 搭的对话智能体服务端。一句话定位：把 Agent 当服务跑，而不是在本地起个 demo 脚本就收工。多用户、多实例、状态外置、工具调用全程有守卫——这几个是当时卡我的点，下面会具体说。
+
+## 写这东西的起因
+
+开源的 Agent 框架大多是个人向的。会话历史往本地 JSON 一丢，单机跑通就算完事。真要按服务来用，多用户加分布式一上来就撞两堵墙。
+
+一是会话。本地文件撑不住多实例，所以我拆成两层：Redis 放会话状态和元数据，读写快、天然分布式；PostgreSQL 归档对话历史，理论上换 MySQL 或 MongoDB 也接得上。这套分层后来证明是对的——热数据和冷数据的访问模式差太多，搅一起反而更麻烦。
+
+二是安全。Agent 能调工具、能执行命令，提示词注入绕不过去。我放了三道闸：`command_guard` 拦危险命令，`path_guard` 把文件操作锁进沙箱，不想让 Agent 碰的工具直接在 `configs/tools.yaml` 里关掉。别指望靠 prompt 说一句"你不准干坏事"就安全，得在工具层物理拦。
+
+顺带一提，这也是我学 AgentScope 的练手项目。写到一半翻了下 Java 版，生产相关的配套（限流、可观测、部署）比 Python 版齐全不少，缺的部分只能自己补。所以这个 repo 一半是学习笔记，一半是补丁。
+
+
+整个 8090 端口是个 FastAPI 应用。`main.py` 只做启动那点事：加载配置、初始化日志和 OTel，然后拉起 uvicorn。`server.py` 是应用本体，`create_app(config)` 工厂函数配 lifespan 资源管理，路由统一在这注册。平台层自带 SessionManager、DatabaseManager、RedisMessageBus、PostgresStorage、ChatService 这一套。
+
+会话 key 统一走 `agentscope:session:` 前缀，每个会话的工作目录在 `workspaces/{user_id}/{session_id}/`。
+
+中间件三件套，都是给工具调用兜底用的：
+
+- `tool_guard.py` — 工具名级黑白名单，控制 Agent 能碰哪些工具
+- `command_guard.py` — 命令内容级检查，拦 `rm -rf /`、反弹 shell 那类
+- `path_guard.py` — 路径访问守卫，把文件操作圈在沙箱里
 
 ## 特性
 
@@ -53,20 +74,13 @@ docker-compose -f docker/deploy_yml/redis.yml up -d
 docker-compose -f docker/deploy_yml/postgres.yml up -d
 ```
 
-`docker-compose up -d` 会一并拉起 Redis、PostgreSQL 及可观测性栈。默认连接信息：
-- Redis: `redis://localhost:6379/0`
-- PostgreSQL: `postgresql://user:password@localhost:5432/ragdb`
+只想起单个也行，模块化的 compose 在 `docker/deploy_yml/`。默认连接：Redis 在 `redis://localhost:6379/0`，PostgreSQL 在 `postgresql://user:password@localhost:5432/ragdb`。
 
-### 4. 启动服务
+然后拉起服务：
 
 ```bash
-# 启动 8090 自有平台层
 APP_ENV=dev python main.py
-```
-
-或使用启动脚本（推荐）：
-
-```bash
+# 或者用启动脚本
 ./scripts/start_8090.sh
 ```
 
@@ -190,63 +204,6 @@ APP_ENV=dev python main.py
 - `{"type": "tool_result", "payload": {"tool_call_id", "state", "result"}}` — 工具结果
 - `{"type": "reply_end", "payload": {"finished_reason", "finished": true}}` — 回复结束
 
-## 项目结构
-
-```
-platform-server-8090/
-├── main.py                    # 启动入口 — 配置加载 + 日志 + OTel + uvicorn
-├── server.py                  # FastAPI 应用 — create_app(config) + lifespan + 路由注册
-├── api/
-│   ├── chat.py                # 对话 API 路由（/chat/stream, /chat/, /sessions/*）
-│   ├── ws_chat.py             # WebSocket 对话端点（/ws/chat）
-│   ├── mcp.py                 # MCP 管理（/mcp）
-│   ├── skill.py               # Skill 管理（/skill）
-│   └── static/                # 旧版前端对话界面（index.html + chat.js）
-├── core/
-│   ├── agent/factory.py       # Agent 工厂（模型/工具/中间件组装）
-│   ├── config/                # 配置加载（YAML + 环境变量 + Pydantic Schema）
-│   ├── database.py            # PostgreSQL 管理器（asyncpg 连接池 + 自动建表）
-│   ├── storage.py             # PostgreSQL 存储层（Agent/Session/MCP/Skill CRUD）
-│   ├── storage_models.py      # 数据模型定义
-│   ├── chat_service.py        # Chat 服务层（Fire-and-Forget 事件驱动模式）
-│   ├── session.py             # 会话管理器（Redis 持久化 + fork + refresh_state）
-│   ├── redis_message_bus.py   # Redis 分布式消息总线（分布式锁 + Pub/Sub）
-│   ├── message_bus.py         # 消息总线抽象
-│   ├── formatter/             # 自定义 Formatter（SiliconFlow 兼容）
-│   ├── workspace.py           # 自有 LocalWorkspaceManager
-│   ├── log/                   # 日志初始化（loguru）
-│   └── tracing/               # OTel 追踪初始化
-├── middleware/
-│   ├── tool_guard.py          # 工具名级黑白名单中间件
-│   ├── command_guard.py       # 命令内容级安全守卫
-│   ├── path_guard.py          # 路径访问守卫
-│   └── tool_manager.py        # 工具管理器（从 tools.yaml 加载）
-├── webui/                     # 新版 React 19 SPA（/webui）
-│   ├── src/                   # 源码（React + TypeScript + TailwindCSS）
-│   ├── dist/                  # 构建产物（由 server.py 直接服务）
-│   ├── package.json           # 前端依赖
-│   └── vite.config.ts         # Vite 构建配置
-├── workflow/
-│   └── base.py                # 自用工作流基类
-├── workspaces/                # 统一沙箱与工作路径
-├── tests/                     # 单元测试
-├── configs/
-│   ├── dev.yaml               # 开发环境配置
-│   ├── prod.yaml              # 生产环境配置
-│   └── tools.yaml             # 工具选择性加载配置
-├── docker/
-│   ├── docker-compose.yaml    # 可观测性栈 + Redis + PostgreSQL
-│   ├── deploy_yml/            # 模块化部署 compose（dev/各数据库独立）
-│   └── exports/               # 导出的 Docker 镜像 tar 包
-├── scripts/
-│   └── start_8090.sh          # 启动 8090 自有平台层
-├── health_check/              # 健康检查工具集（可单独执行）
-├── skills/                    # 自定义 Skill 目录
-├── docs/                      # 设计文档
-├── .env.example               # 环境变量模板
-├── pyproject.toml             # 项目依赖
-└── requirements.txt           # 锁定依赖
-```
 
 ## 配置说明
 
@@ -256,7 +213,7 @@ platform-server-8090/
 
 ```yaml
 llm:
-  api_key: "${LLM_API_KEY}"        # 从环境变量读取
+  api_key: "${LLM_API_KEY}"
   base_url: "https://api.siliconflow.cn/v1"
   model: "Qwen/Qwen3.6-35B-A3B"
   stream: true
@@ -320,20 +277,6 @@ agent:
       - "Invoke-Expression*"   # 拦截 PowerShell 远程执行
 ```
 
-## 会话分支（Fork）
-
-基于已有会话创建分支，父子状态完全独立：
-
-```bash
-# 创建分支
-curl -X POST http://localhost:8090/sessions/{user_id}/{session_id}/fork
-
-# 返回: {"session_id": "<新ID>", "parent_session_id": "<父ID>", "title": "...(分支)"}
-```
-
-- Redis：子会话深拷贝父会话 AgentState JSON，完全独立
-- PostgreSQL：`sessions` 表记录 `parent_session_id` 和 `depth`（fork 深度）
-- 支持多级 fork（子会话可继续 fork）
 
 ## 多实例部署
 
@@ -359,18 +302,14 @@ TracingMiddleware 自动记录：
 
 ## 健康检查
 
-```bash
-# 一键检查所有组件
-.venv/Scripts/python.exe health_check/check_all.py
+`health_check/` 下能单独跑，也能一把全查：
 
-# 单独检查
-.venv/Scripts/python.exe health_check/check_http.py
-.venv/Scripts/python.exe health_check/check_redis.py
-.venv/Scripts/python.exe health_check/check_postgres.py
-.venv/Scripts/python.exe health_check/check_llm.py
+```bash
+.venv/Scripts/python.exe health_check/check_all.py
+# 单独查：check_http / check_redis / check_postgres / check_llm
 ```
 
-## 新版 WebUI
+## WebUI
 
 基于 React 19 + TypeScript + TailwindCSS 构建的 SPA 前端：
 
@@ -387,19 +326,44 @@ cd webui && npm install && npm run build
 cd webui && npm run dev
 ```
 
-## 相关文档
+## 项目结构
 
-| 文档 | 说明 |
-|------|------|
-| [开发指南](docs/development-guide.md) | 开发环境搭建与规范 |
-| [部署与运维指南](docs/deployment-guide.md) | 部署与运维 |
-| [AgentScope API 参考](docs/agentscope-api-reference.md) | AgentScope API 速查 |
-| [AgentScope 代码模式](docs/agentscope-patterns.md) | AgentScope 使用模式 |
-| [会话持久化设计](docs/persistence-design.md) | 持久化架构设计 |
-| [健康检查规划](docs/health-check-plan.md) | 健康检查工具规划 |
-| [重构规划](docs/refactor-plan.md) | main.py 拆分重构规划 |
-| [WebUI 规划](docs/webui-plan.md) | 新版 WebUI 设计 |
-| [WebSocket 规划](docs/websocket-plan.md) | WebSocket 通道设计 |
-| [沙箱规划](docs/sandbox-plan.md) | 沙箱隔离设计 |
-| [工具中间件规划](docs/tool-middleware-plan.md) | 工具守卫设计 |
-| [危险命令防护](docs/dangerous-commands.md) | 命令安全守卫说明 |
+```
+platform-server-8090/
+├── main.py              # 启动入口
+├── server.py            # FastAPI 应用
+├── api/                 # 路由层（chat / ws / mcp / skill / 旧版静态界面）
+├── core/                # 会话、存储、消息总线、formatter、workspace、tracing
+│   ├── agent/factory.py # Agent 工厂
+│   ├── config/          # 配置加载
+│   ├── database.py      # PostgreSQL 管理器
+│   ├── storage*.py      # 存储层 + 数据模型
+│   ├── chat_service.py  # Chat 服务（事件驱动）
+│   ├── session.py       # 会话管理器
+│   ├── redis_message_bus.py
+│   └── formatter/       # SiliconFlow 兼容
+├── middleware/          # tool_guard / command_guard / path_guard / tool_manager
+├── webui/               # React 19 SPA
+├── workflow/base.py     # 工作流基类
+├── workspaces/          # 沙箱与工作路径
+├── configs/            # dev.yaml / prod.yaml / tools.yaml
+├── docker/             # compose + 模块化部署 + 镜像导出
+├── scripts/start_8090.sh
+├── health_check/        # 健康检查脚本
+├── skills/              # 自定义 Skill
+├── docs/                # 设计文档
+└── pyproject.toml / requirements.txt
+```
+
+## 文档索引
+
+开发、部署、API 参考、各种设计规划都在 `docs/` 
+
+
+## TODO LIST
+
+- 补文档。
+- 换个项目名。
+- 重新写前端界面，当前刚好凑合能用。
+- 守卫测试，测试样例不是很多，也不确定这是不是真有用。
+- 服务实例和沙箱和用户之间的分配问题，计划是一个用户分一个沙箱，但这边验证资源有限，先标记一下吧。
